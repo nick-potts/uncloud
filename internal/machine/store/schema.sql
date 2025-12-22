@@ -35,3 +35,19 @@ CREATE INDEX idx_machines_name ON machines (name);
 CREATE INDEX idx_containers_machine_id ON containers (machine_id);
 CREATE INDEX idx_containers_service_id ON containers (service_id);
 CREATE INDEX idx_containers_service_name ON containers (service_name);
+
+-- deployment_locks table provides distributed locking for deployments to prevent concurrent
+-- deployments of the same service or project from conflicting with each other.
+CREATE TABLE deployment_locks
+(
+    -- lock_key identifies the resource being locked (e.g., "service:<name>" or "project:<name>").
+    lock_key      TEXT NOT NULL PRIMARY KEY,
+    -- deployment_id is a unique identifier for the deployment operation holding the lock.
+    deployment_id TEXT NOT NULL,
+    -- owner identifies who holds the lock (e.g., machine ID or client identifier).
+    owner         TEXT NOT NULL DEFAULT '',
+    -- acquired_at is when the lock was acquired.
+    acquired_at   TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+    -- expires_at provides TTL for automatic lock release if the owner crashes.
+    expires_at    TIMESTAMP NOT NULL
+);

@@ -125,6 +125,20 @@ func run(ctx context.Context, uncli *cli.CLI, opts runOptions) error {
 	}
 	defer clusterClient.Close()
 
+	// Create a deployment lock for the service to prevent concurrent deployments.
+	hostname, _ := os.Hostname()
+	lockOwner := fmt.Sprintf("%s (pid %d)", hostname, os.Getpid())
+	serviceLock := deploy.NewDeploymentLock(nil, deploy.ServiceLockKey(spec.Name), lockOwner)
+
+	// Acquire the lock before running the service.
+	if err := serviceLock.Acquire(ctx); err != nil {
+		return fmt.Errorf("acquire deployment lock for service '%s': %w", spec.Name, err)
+	}
+	defer func() {
+		// Release the lock when done, regardless of outcome.
+		_ = serviceLock.Release(ctx)
+	}()
+
 	var resp api.RunServiceResponse
 	err = progress.RunWithTitle(ctx, func(ctx context.Context) error {
 		resp, err = clusterClient.RunService(ctx, spec)

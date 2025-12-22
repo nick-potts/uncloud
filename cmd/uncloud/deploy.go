@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -151,6 +152,22 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 	if opts.recreate {
 		strategy = &deploy.RollingStrategy{ForceRecreate: true}
 	}
+
+	// Create a deployment lock for the project to prevent concurrent deployments.
+	// The lock is acquired before planning to ensure we have a consistent view of cluster state.
+	hostname, _ := os.Hostname()
+	lockOwner := fmt.Sprintf("%s (pid %d)", hostname, os.Getpid())
+	projectLock := deploy.NewDeploymentLock(nil, deploy.ProjectLockKey(project.Name), lockOwner)
+
+	// Acquire the lock before creating the deployment plan.
+	if err := projectLock.Acquire(ctx); err != nil {
+		return fmt.Errorf("acquire deployment lock for project '%s': %w", project.Name, err)
+	}
+	defer func() {
+		// Release the lock when done, regardless of outcome.
+		_ = projectLock.Release(ctx)
+	}()
+
 	composeDeploy, err := compose.NewDeploymentWithStrategy(ctx, clusterClient, project, strategy)
 	if err != nil {
 		return fmt.Errorf("create compose deployment: %w", err)

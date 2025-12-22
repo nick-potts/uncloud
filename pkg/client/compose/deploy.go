@@ -28,6 +28,9 @@ type Deployment struct {
 	Strategy     deploy.Strategy
 	state        *scheduler.ClusterState
 	plan         *deploy.SequenceOperation
+	// Lock is an optional deployment lock to prevent concurrent deployments.
+	// If nil, no locking is performed (lock client not available).
+	Lock *deploy.DeploymentLock
 }
 
 func NewDeployment(ctx context.Context, cli Client, project *types.Project) (*Deployment, error) {
@@ -190,7 +193,21 @@ func (d *Deployment) checkExternalVolumesExist() error {
 	return nil
 }
 
+// Run executes the deployment plan with optional locking.
+// If a Lock is set on the Deployment, it will be acquired before execution
+// and released after (regardless of success or failure).
 func (d *Deployment) Run(ctx context.Context) error {
+	// Acquire the deployment lock if available.
+	if d.Lock != nil {
+		if err := d.Lock.Acquire(ctx); err != nil {
+			return fmt.Errorf("acquire deployment lock: %w", err)
+		}
+		defer func() {
+			// Release the lock when done, regardless of execution result.
+			_ = d.Lock.Release(ctx)
+		}()
+	}
+
 	plan, err := d.Plan(ctx)
 	if err != nil {
 		return fmt.Errorf("create plan: %w", err)
