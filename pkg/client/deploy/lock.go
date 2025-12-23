@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -115,6 +116,11 @@ func ProjectLockKey(projectName string) string {
 	return ProjectLockKeyPrefix + projectName
 }
 
+// LockKey returns the lock key for this lock.
+func (l *DeploymentLock) LockKey() string {
+	return l.lockKey
+}
+
 // Acquire attempts to acquire the deployment lock.
 // Returns ErrLockNotAvailable if no lock client is available (strict mode).
 // Returns ErrDeploymentLocked if the lock is held by another deployment.
@@ -200,15 +206,21 @@ func (l *DeploymentLock) Release(ctx context.Context) error {
 // refreshLoop periodically refreshes the lock to prevent expiration during long deployments.
 // If refresh fails (lock lost), it marks the lock as lost and stops.
 func (l *DeploymentLock) refreshLoop(ctx context.Context) {
-	// Add jitter to prevent thundering herd if multiple locks exist.
-	ticker := time.NewTicker(LockRefreshInterval)
-	defer ticker.Stop()
+	// Add jitter (±10%) to prevent thundering herd if multiple locks exist.
+	jitterRange := float64(LockRefreshInterval) * 0.1
+	nextInterval := func() time.Duration {
+		jitter := time.Duration(rand.Float64()*2*jitterRange - jitterRange)
+		return LockRefreshInterval + jitter
+	}
+
+	timer := time.NewTimer(nextInterval())
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			l.mu.Lock()
 			if !l.acquired || l.client == nil || l.mode == LockModeDisabled {
 				l.mu.Unlock()
@@ -237,6 +249,9 @@ func (l *DeploymentLock) refreshLoop(ctx context.Context) {
 				"deployment_id", l.deploymentID,
 				"generation", generation)
 			l.mu.Unlock()
+
+			// Reset timer with new jittered interval for next refresh.
+			timer.Reset(nextInterval())
 		}
 	}
 }

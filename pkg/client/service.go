@@ -45,7 +45,9 @@ func (cli *Client) RunServiceWithLock(ctx context.Context, spec api.ServiceSpec,
 
 	// Create missing named Docker volumes for the service.
 	if len(spec.MountedDockerVolumes()) > 0 {
-		// Validate lock before creating volumes.
+		// Fast-fail optimization: validate lock before doing any volume scheduling work.
+		// This avoids expensive cluster state inspection if the lock is already lost.
+		// Individual volume creations also validate the lock for fencing correctness.
 		if lock != nil {
 			if err := lock.Validate(ctx); err != nil {
 				return resp, fmt.Errorf("lock validation failed before volume creation: %w", err)

@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	dockeropts "github.com/docker/cli/opts"
 	"github.com/docker/compose/v2/pkg/progress"
@@ -146,7 +148,14 @@ func run(ctx context.Context, uncli *cli.CLI, opts runOptions) error {
 	}
 	defer func() {
 		// Release the lock when done, regardless of outcome.
-		_ = serviceLock.Release(ctx)
+		// Use a fresh context with timeout since the original context may be cancelled.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := serviceLock.Release(releaseCtx); err != nil {
+			slog.Warn("Failed to release deployment lock",
+				"lock_key", deploy.ServiceLockKey(spec.Name),
+				"error", err)
+		}
 	}()
 
 	var resp api.RunServiceResponse

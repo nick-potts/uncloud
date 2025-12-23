@@ -18,6 +18,7 @@ import (
 	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	"github.com/psviderski/uncloud/internal/machine/store"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -106,7 +107,7 @@ func (c *Cluster) RefreshDeploymentLock(
 			return nil, status.Error(codes.FailedPrecondition, "lock not held by this deployment")
 		}
 		if errors.Is(err, store.ErrLockLost) {
-			return nil, status.Error(codes.FailedPrecondition, fmt.Sprintf("lock lost: %v", err))
+			return nil, status.Error(codes.FailedPrecondition, "lock was lost (generation mismatch)")
 		}
 		return nil, status.Errorf(codes.Internal, "refresh lock: %v", err)
 	}
@@ -158,7 +159,7 @@ func (c *Cluster) ValidateDeploymentLock(
 			return nil, status.Error(codes.FailedPrecondition, "lock not held by this deployment")
 		}
 		if errors.Is(err, store.ErrLockLost) {
-			return nil, status.Error(codes.FailedPrecondition, fmt.Sprintf("lock lost: %v", err))
+			return nil, status.Error(codes.FailedPrecondition, "lock was lost (generation mismatch)")
 		}
 		return nil, status.Errorf(codes.Internal, "validate lock: %v", err)
 	}
@@ -176,7 +177,7 @@ func storeLockToPb(lock *store.DeploymentLock) *pb.DeploymentLock {
 		DeploymentId: lock.DeploymentID,
 		Owner:        lock.Owner,
 		Generation:   lock.Generation,
-		AcquiredAt:   lock.AcquiredAt.Format(time.RFC3339),
-		ExpiresAt:    lock.ExpiresAt.Format(time.RFC3339),
+		AcquiredAt:   timestamppb.New(lock.AcquiredAt),
+		ExpiresAt:    timestamppb.New(lock.ExpiresAt),
 	}
 }

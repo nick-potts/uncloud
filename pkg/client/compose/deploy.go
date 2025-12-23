@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/graph"
 	"github.com/compose-spec/compose-go/v2/types"
@@ -204,7 +206,14 @@ func (d *Deployment) Run(ctx context.Context) error {
 		}
 		defer func() {
 			// Release the lock when done, regardless of execution result.
-			_ = d.Lock.Release(ctx)
+			// Use a fresh context with timeout since the original context may be cancelled.
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := d.Lock.Release(releaseCtx); err != nil {
+				slog.Warn("Failed to release deployment lock",
+					"lock_key", d.Lock.LockKey(),
+					"error", err)
+			}
 		}()
 	}
 

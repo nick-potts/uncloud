@@ -5,6 +5,7 @@ package api;
 option go_package = "github.com/psviderski/uncloud/internal/machine/api/pb";
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
 import "internal/machine/api/pb/common.proto";
 import "internal/machine/api/pb/machine.proto";
 
@@ -114,10 +115,10 @@ message DeploymentLock {
   string owner = 3;
   // generation is a monotonically increasing fencing token. Operations must validate this matches.
   int64 generation = 4;
-  // acquired_at is when the lock was acquired (RFC3339 format).
-  string acquired_at = 5;
-  // expires_at is when the lock expires (RFC3339 format).
-  string expires_at = 6;
+  // acquired_at is when the lock was acquired.
+  google.protobuf.Timestamp acquired_at = 5;
+  // expires_at is when the lock expires.
+  google.protobuf.Timestamp expires_at = 6;
 }
 
 message AcquireDeploymentLockRequest {

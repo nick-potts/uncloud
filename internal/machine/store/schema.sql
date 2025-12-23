@@ -54,3 +54,6 @@ CREATE TABLE deployment_locks
     -- expires_at provides TTL for automatic lock release if the owner crashes.
     expires_at    TIMESTAMP NOT NULL
 );
+
+-- Index on expires_at for efficient cleanup of expired locks.
+CREATE INDEX IF NOT EXISTS idx_deployment_locks_expires_at ON deployment_locks (expires_at);

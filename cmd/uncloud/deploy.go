@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	composecli "github.com/compose-spec/compose-go/v2/cli"
@@ -176,7 +178,14 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 	}
 	defer func() {
 		// Release the lock when done, regardless of outcome.
-		_ = projectLock.Release(ctx)
+		// Use a fresh context with timeout since the original context may be cancelled.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := projectLock.Release(releaseCtx); err != nil {
+			slog.Warn("Failed to release deployment lock",
+				"lock_key", deploy.ProjectLockKey(project.Name),
+				"error", err)
+		}
 	}()
 
 	composeDeploy, err := compose.NewDeploymentWithStrategy(ctx, clusterClient, project, strategy)
