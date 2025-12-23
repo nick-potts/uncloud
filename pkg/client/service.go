@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	"github.com/psviderski/uncloud/pkg/api"
+	"github.com/psviderski/uncloud/pkg/client/deploy"
 	"github.com/psviderski/uncloud/pkg/client/deploy/scheduler"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -19,6 +20,12 @@ import (
 )
 
 func (cli *Client) RunService(ctx context.Context, spec api.ServiceSpec) (api.RunServiceResponse, error) {
+	return cli.RunServiceWithLock(ctx, spec, nil)
+}
+
+// RunServiceWithLock runs a new service with lock validation before each mutation.
+// If lock is nil, executes without fencing (equivalent to RunService).
+func (cli *Client) RunServiceWithLock(ctx context.Context, spec api.ServiceSpec, lock *deploy.DeploymentLock) (api.RunServiceResponse, error) {
 	var resp api.RunServiceResponse
 
 	if err := spec.Validate(); err != nil {
@@ -38,6 +45,13 @@ func (cli *Client) RunService(ctx context.Context, spec api.ServiceSpec) (api.Ru
 
 	// Create missing named Docker volumes for the service.
 	if len(spec.MountedDockerVolumes()) > 0 {
+		// Validate lock before creating volumes.
+		if lock != nil {
+			if err := lock.Validate(ctx); err != nil {
+				return resp, fmt.Errorf("lock validation failed before volume creation: %w", err)
+			}
+		}
+
 		state, err := scheduler.InspectClusterState(ctx, cli)
 		if err != nil {
 			return resp, fmt.Errorf("inspect cluster state: %w", err)
@@ -55,6 +69,13 @@ func (cli *Client) RunService(ctx context.Context, spec api.ServiceSpec) (api.Ru
 		// Create the missing volumes on the scheduled machines.
 		for machineID, volumes := range scheduledVolumes {
 			for _, v := range volumes {
+				// Validate lock before each volume creation.
+				if lock != nil {
+					if err := lock.Validate(ctx); err != nil {
+						return resp, fmt.Errorf("lock validation failed before creating volume '%s': %w", v.Name, err)
+					}
+				}
+
 				opts := volume.CreateOptions{
 					Name: v.Name,
 				}
@@ -74,7 +95,7 @@ func (cli *Client) RunService(ctx context.Context, spec api.ServiceSpec) (api.Ru
 	}
 
 	deployment := cli.NewDeployment(spec, nil)
-	plan, err := deployment.Run(ctx)
+	plan, err := deployment.RunWithLock(ctx, lock)
 	if err != nil {
 		return resp, err
 	}

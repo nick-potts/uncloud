@@ -151,7 +151,8 @@ func run(ctx context.Context, uncli *cli.CLI, opts runOptions) error {
 
 	var resp api.RunServiceResponse
 	err = progress.RunWithTitle(ctx, func(ctx context.Context) error {
-		resp, err = clusterClient.RunService(ctx, spec)
+		// Use fenced execution to validate lock before each mutation.
+		resp, err = clusterClient.RunServiceWithLock(ctx, spec, serviceLock)
 		if err != nil {
 			return fmt.Errorf("run service: %w", err)
 		}

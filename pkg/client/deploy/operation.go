@@ -172,6 +172,31 @@ func (o *SequenceOperation) Execute(ctx context.Context, cli Client) error {
 	return nil
 }
 
+// ExecuteWithLock executes the sequence while validating the lock before each operation.
+// This is the fenced execution path that prevents stale deployments from making changes
+// after their lock has been taken over.
+//
+// The lock is validated before EVERY operation, not just at the start. This ensures that
+// if a lock expires and is taken over mid-deployment, the stale deployment stops immediately.
+func (o *SequenceOperation) ExecuteWithLock(ctx context.Context, cli Client, lock *DeploymentLock) error {
+	if lock == nil {
+		// No lock provided - execute without fencing (for backwards compatibility).
+		return o.Execute(ctx, cli)
+	}
+
+	for i, op := range o.Operations {
+		// Validate lock before each mutation to detect takeover.
+		if err := lock.Validate(ctx); err != nil {
+			return fmt.Errorf("lock validation failed before operation %d (%s): %w", i, op.String(), err)
+		}
+
+		if err := op.Execute(ctx, cli); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (o *SequenceOperation) Format(resolver NameResolver) string {
 	ops := make([]string, len(o.Operations))
 	for i, op := range o.Operations {

@@ -218,7 +218,9 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 	}
 
 	return progress.RunWithTitle(ctx, func(ctx context.Context) error {
-		if err := plan.Execute(ctx, clusterClient); err != nil {
+		// Use fenced execution to validate lock before each mutation.
+		// This prevents stale deployments from continuing after lock takeover.
+		if err := plan.ExecuteWithLock(ctx, clusterClient, projectLock); err != nil {
 			return fmt.Errorf("deploy services: %w", err)
 		}
 		return nil
