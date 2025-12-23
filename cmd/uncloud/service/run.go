@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	dockeropts "github.com/docker/cli/opts"
 	"github.com/docker/compose/v2/pkg/progress"
@@ -28,6 +30,7 @@ type runOptions struct {
 	memory            dockeropts.MemBytes
 	mode              string
 	name              string
+	noLock            bool
 	privileged        bool
 	publish           []string
 	pull              string
@@ -80,6 +83,8 @@ func NewRunCommand() *cobra.Command {
 			"Examples: 1073741824, 1024m, 1g (all equal 1 gibibyte)")
 	cmd.Flags().StringVarP(&opts.name, "name", "n", "",
 		"Assign a name to the service. A random name is generated if not specified.")
+	cmd.Flags().BoolVar(&opts.noLock, "no-lock", false,
+		"DANGEROUS: Disable deployment locking. Only use for emergencies when the lock system is unavailable.")
 	cmd.Flags().BoolVar(&opts.privileged, "privileged", false,
 		"Give extended privileges to service containers. This is a security risk and should be used with caution.")
 	cmd.Flags().StringSliceVarP(&opts.publish, "publish", "p", nil,
@@ -125,9 +130,38 @@ func run(ctx context.Context, uncli *cli.CLI, opts runOptions) error {
 	}
 	defer clusterClient.Close()
 
+	// Create a deployment lock for the service to prevent concurrent deployments.
+	var serviceLock *deploy.DeploymentLock
+	if opts.noLock {
+		serviceLock = deploy.NewDisabledLock(deploy.ServiceLockKey(spec.Name))
+	} else {
+		hostname, _ := os.Hostname()
+		lockOwner := fmt.Sprintf("%s (pid %d)", hostname, os.Getpid())
+		// TODO: Pass actual LockClient once gRPC methods are generated (run 'make proto').
+		// For now, passing nil will cause strict mode to fail with a helpful error.
+		serviceLock = deploy.NewDeploymentLock(nil, deploy.ServiceLockKey(spec.Name), lockOwner)
+	}
+
+	// Acquire the lock before running the service.
+	if err := serviceLock.Acquire(ctx); err != nil {
+		return fmt.Errorf("acquire deployment lock for service '%s': %w", spec.Name, err)
+	}
+	defer func() {
+		// Release the lock when done, regardless of outcome.
+		// Use a fresh context with timeout since the original context may be cancelled.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := serviceLock.Release(releaseCtx); err != nil {
+			slog.Warn("Failed to release deployment lock",
+				"lock_key", deploy.ServiceLockKey(spec.Name),
+				"error", err)
+		}
+	}()
+
 	var resp api.RunServiceResponse
 	err = progress.RunWithTitle(ctx, func(ctx context.Context) error {
-		resp, err = clusterClient.RunService(ctx, spec)
+		// Use fenced execution to validate lock before each mutation.
+		resp, err = clusterClient.RunServiceWithLock(ctx, spec, serviceLock)
 		if err != nil {
 			return fmt.Errorf("run service: %w", err)
 		}

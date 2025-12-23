@@ -143,10 +143,16 @@ func (d *Deployment) Validate(ctx context.Context) error {
 // the existing one to match the desired specification.
 // TODO: forbid to run the same deployment more than once.
 func (d *Deployment) Run(ctx context.Context) (Plan, error) {
+	return d.RunWithLock(ctx, nil)
+}
+
+// RunWithLock executes the deployment plan with lock validation before each mutation.
+// If lock is nil, executes without fencing (equivalent to Run).
+func (d *Deployment) RunWithLock(ctx context.Context, lock *DeploymentLock) (Plan, error) {
 	plan, err := d.Plan(ctx)
 	if err != nil {
 		return plan, fmt.Errorf("create plan: %w", err)
 	}
 
-	return plan, plan.Execute(ctx, d.cli)
+	return plan, plan.ExecuteWithLock(ctx, d.cli, lock)
 }

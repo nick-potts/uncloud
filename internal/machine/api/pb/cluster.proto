@@ -5,6 +5,7 @@ package api;
 option go_package = "github.com/psviderski/uncloud/internal/machine/api/pb";
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
 import "internal/machine/api/pb/common.proto";
 import "internal/machine/api/pb/machine.proto";
 
@@ -18,6 +19,13 @@ service Cluster {
   rpc GetDomain(google.protobuf.Empty) returns (Domain);
   rpc ReleaseDomain(google.protobuf.Empty) returns (Domain);
   rpc CreateDomainRecords(CreateDomainRecordsRequest) returns (CreateDomainRecordsResponse);
+
+  // Deployment lock operations for preventing concurrent deployments.
+  rpc AcquireDeploymentLock(AcquireDeploymentLockRequest) returns (AcquireDeploymentLockResponse);
+  rpc ReleaseDeploymentLock(ReleaseDeploymentLockRequest) returns (google.protobuf.Empty);
+  rpc RefreshDeploymentLock(RefreshDeploymentLockRequest) returns (google.protobuf.Empty);
+  rpc GetDeploymentLock(GetDeploymentLockRequest) returns (DeploymentLock);
+  rpc ValidateDeploymentLock(ValidateDeploymentLockRequest) returns (google.protobuf.Empty);
 }
 
 message AddMachineRequest {
@@ -95,4 +103,62 @@ message DNSRecord {
   }
   RecordType type = 2;
   repeated string values = 3;
+}
+
+// Deployment lock messages for preventing concurrent deployments.
+message DeploymentLock {
+  // lock_key identifies the resource being locked (e.g., "service:<name>" or "project:<name>").
+  string lock_key = 1;
+  // deployment_id is a unique identifier for the deployment operation holding the lock.
+  string deployment_id = 2;
+  // owner identifies who holds the lock (e.g., machine ID or client identifier).
+  string owner = 3;
+  // generation is a monotonically increasing fencing token. Operations must validate this matches.
+  int64 generation = 4;
+  // acquired_at is when the lock was acquired.
+  google.protobuf.Timestamp acquired_at = 5;
+  // expires_at is when the lock expires.
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message AcquireDeploymentLockRequest {
+  // lock_key identifies the resource to lock.
+  string lock_key = 1;
+  // deployment_id is a unique identifier for this deployment operation.
+  string deployment_id = 2;
+  // owner identifies who is acquiring the lock.
+  string owner = 3;
+  // ttl_seconds is how long the lock should be held before it expires automatically.
+  int64 ttl_seconds = 4;
+}
+
+message AcquireDeploymentLockResponse {
+  // acquired indicates whether the lock was successfully acquired.
+  bool acquired = 1;
+  // lock contains the current lock state if acquired, or the existing lock if not acquired.
+  DeploymentLock lock = 2;
+}
+
+message ReleaseDeploymentLockRequest {
+  string lock_key = 1;
+  string deployment_id = 2;
+}
+
+message RefreshDeploymentLockRequest {
+  string lock_key = 1;
+  string deployment_id = 2;
+  // generation must match the current lock generation (fencing).
+  int64 generation = 3;
+  int64 ttl_seconds = 4;
+}
+
+message GetDeploymentLockRequest {
+  string lock_key = 1;
+}
+
+message ValidateDeploymentLockRequest {
+  string lock_key = 1;
+  string deployment_id = 2;
+  // generation must match the current lock generation (fencing).
+  int64 generation = 3;
 }

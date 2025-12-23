@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/graph"
 	"github.com/compose-spec/compose-go/v2/types"
@@ -28,6 +30,9 @@ type Deployment struct {
 	Strategy     deploy.Strategy
 	state        *scheduler.ClusterState
 	plan         *deploy.SequenceOperation
+	// Lock is an optional deployment lock to prevent concurrent deployments.
+	// If nil, no locking is performed (lock client not available).
+	Lock *deploy.DeploymentLock
 }
 
 func NewDeployment(ctx context.Context, cli Client, project *types.Project) (*Deployment, error) {
@@ -190,7 +195,28 @@ func (d *Deployment) checkExternalVolumesExist() error {
 	return nil
 }
 
+// Run executes the deployment plan with optional locking.
+// If a Lock is set on the Deployment, it will be acquired before execution
+// and released after (regardless of success or failure).
 func (d *Deployment) Run(ctx context.Context) error {
+	// Acquire the deployment lock if available.
+	if d.Lock != nil {
+		if err := d.Lock.Acquire(ctx); err != nil {
+			return fmt.Errorf("acquire deployment lock: %w", err)
+		}
+		defer func() {
+			// Release the lock when done, regardless of execution result.
+			// Use a fresh context with timeout since the original context may be cancelled.
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := d.Lock.Release(releaseCtx); err != nil {
+				slog.Warn("Failed to release deployment lock",
+					"lock_key", d.Lock.LockKey(),
+					"error", err)
+			}
+		}()
+	}
+
 	plan, err := d.Plan(ctx)
 	if err != nil {
 		return fmt.Errorf("create plan: %w", err)

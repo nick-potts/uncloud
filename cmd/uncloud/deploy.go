@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	composecli "github.com/compose-spec/compose-go/v2/cli"
@@ -24,6 +27,7 @@ type deployOptions struct {
 	profiles []string
 	services []string
 	noBuild  bool
+	noLock   bool
 	recreate bool
 	yes      bool
 }
@@ -55,6 +59,9 @@ func NewDeployCommand() *cobra.Command {
 		"Do not build new images before deploying services.")
 	cmd.Flags().BoolVar(&opts.BuildServicesOptions.NoCache, "no-cache", false,
 		"Do not use cache when building images.")
+	cmd.Flags().BoolVar(&opts.noLock, "no-lock", false,
+		"DANGEROUS: Disable deployment locking. Only use for emergencies when the lock system is unavailable.\n"+
+			"Concurrent deployments without locking may cause inconsistent state.")
 	cmd.Flags().StringSliceVarP(&opts.profiles, "profile", "p", nil,
 		"One or more Compose profiles to enable.")
 	cmd.Flags().BoolVar(&opts.recreate, "recreate", false,
@@ -151,6 +158,36 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 	if opts.recreate {
 		strategy = &deploy.RollingStrategy{ForceRecreate: true}
 	}
+
+	// Create a deployment lock for the project to prevent concurrent deployments.
+	// The lock is acquired before planning to ensure we have a consistent view of cluster state.
+	var projectLock *deploy.DeploymentLock
+	if opts.noLock {
+		projectLock = deploy.NewDisabledLock(deploy.ProjectLockKey(project.Name))
+	} else {
+		hostname, _ := os.Hostname()
+		lockOwner := fmt.Sprintf("%s (pid %d)", hostname, os.Getpid())
+		// TODO: Pass actual LockClient once gRPC methods are generated (run 'make proto').
+		// For now, passing nil will cause strict mode to fail with a helpful error.
+		projectLock = deploy.NewDeploymentLock(nil, deploy.ProjectLockKey(project.Name), lockOwner)
+	}
+
+	// Acquire the lock before creating the deployment plan.
+	if err := projectLock.Acquire(ctx); err != nil {
+		return fmt.Errorf("acquire deployment lock for project '%s': %w", project.Name, err)
+	}
+	defer func() {
+		// Release the lock when done, regardless of outcome.
+		// Use a fresh context with timeout since the original context may be cancelled.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := projectLock.Release(releaseCtx); err != nil {
+			slog.Warn("Failed to release deployment lock",
+				"lock_key", deploy.ProjectLockKey(project.Name),
+				"error", err)
+		}
+	}()
+
 	composeDeploy, err := compose.NewDeploymentWithStrategy(ctx, clusterClient, project, strategy)
 	if err != nil {
 		return fmt.Errorf("create compose deployment: %w", err)
@@ -190,7 +227,9 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 	}
 
 	return progress.RunWithTitle(ctx, func(ctx context.Context) error {
-		if err := plan.Execute(ctx, clusterClient); err != nil {
+		// Use fenced execution to validate lock before each mutation.
+		// This prevents stale deployments from continuing after lock takeover.
+		if err := plan.ExecuteWithLock(ctx, clusterClient, projectLock); err != nil {
 			return fmt.Errorf("deploy services: %w", err)
 		}
 		return nil
