@@ -13,6 +13,8 @@ var (
 	ErrLockHeld = errors.New("lock is held by another deployment")
 	// ErrLockNotHeld is returned when attempting to release or refresh a lock that is not held by this deployment.
 	ErrLockNotHeld = errors.New("lock is not held by this deployment")
+	// ErrLockLost is returned when the lock was lost (e.g., expired and taken by another deployment).
+	ErrLockLost = errors.New("lock was lost")
 )
 
 // DeploymentLock represents a distributed lock record for deployments.
@@ -20,50 +22,88 @@ type DeploymentLock struct {
 	LockKey      string
 	DeploymentID string
 	Owner        string
-	AcquiredAt   time.Time
-	ExpiresAt    time.Time
+	// Generation is a monotonically increasing fencing token. Each acquire increments this value.
+	// Operations should validate that generation matches to prevent stale operations.
+	Generation int64
+	AcquiredAt time.Time
+	ExpiresAt  time.Time
+}
+
+// AcquireLockResult contains the result of a lock acquisition attempt.
+type AcquireLockResult struct {
+	// Acquired indicates whether the lock was successfully acquired.
+	Acquired bool
+	// Lock contains the lock state (current holder if not acquired, or new lock if acquired).
+	Lock *DeploymentLock
 }
 
 // AcquireLock attempts to acquire a deployment lock for the given key.
-// If the lock is already held by another deployment (and not expired), ErrLockHeld is returned.
-// If the lock exists but is expired, it will be replaced with the new lock.
+// If the lock is already held by another deployment (and not expired), returns Acquired=false with current lock info.
+// If the lock exists but is expired, it will be replaced with the new lock (generation incremented).
 // The ttl parameter specifies how long the lock should be held before it expires automatically.
-func (s *Store) AcquireLock(ctx context.Context, lockKey, deploymentID, owner string, ttl time.Duration) error {
-	expiresAt := time.Now().Add(ttl)
+//
+// This is an atomic compare-and-swap operation using SQLite's INSERT OR REPLACE with proper conditions.
+// The generation is incremented on each successful acquire to serve as a fencing token.
+func (s *Store) AcquireLock(ctx context.Context, lockKey, deploymentID, owner string, ttl time.Duration) (*AcquireLockResult, error) {
+	// Use server-side time consistently (datetime('now')) for all timestamp comparisons.
+	// TTL is added as seconds to the server time to compute expires_at.
+	ttlSeconds := int64(ttl.Seconds())
 
-	// Try to insert a new lock, or replace an expired lock.
-	// The INSERT will succeed if:
-	// 1. No lock exists for this key, OR
-	// 2. The existing lock has expired (expires_at < now), OR
-	// 3. The existing lock is held by the same deployment (allows re-acquisition)
+	// Atomic acquire using INSERT with ON CONFLICT.
+	// The UPDATE only happens if:
+	// 1. The lock has expired (expires_at < datetime('now')), OR
+	// 2. The same deployment is re-acquiring (allows idempotent acquire)
+	//
+	// On successful acquire (insert or expired takeover), generation is incremented.
+	// On re-acquire by same deployment, generation stays the same.
 	res, err := s.corro.ExecContext(ctx, `
-		INSERT INTO deployment_locks (lock_key, deployment_id, owner, acquired_at, expires_at)
-		VALUES (?, ?, ?, datetime('now'), ?)
+		INSERT INTO deployment_locks (lock_key, deployment_id, owner, generation, acquired_at, expires_at)
+		VALUES (?, ?, ?, 1, datetime('now'), datetime('now', '+' || ? || ' seconds'))
 		ON CONFLICT (lock_key) DO UPDATE SET
 			deployment_id = excluded.deployment_id,
 			owner = excluded.owner,
-			acquired_at = excluded.acquired_at,
-			expires_at = excluded.expires_at
+			generation = CASE
+				WHEN deployment_locks.deployment_id = excluded.deployment_id THEN deployment_locks.generation
+				ELSE deployment_locks.generation + 1
+			END,
+			acquired_at = datetime('now'),
+			expires_at = datetime('now', '+' || ? || ' seconds')
 		WHERE deployment_locks.expires_at < datetime('now')
 		   OR deployment_locks.deployment_id = excluded.deployment_id`,
-		lockKey, deploymentID, owner, expiresAt.UTC().Format(time.DateTime))
+		lockKey, deploymentID, owner, ttlSeconds, ttlSeconds)
 	if err != nil {
-		return fmt.Errorf("acquire lock query: %w", err)
+		return nil, fmt.Errorf("acquire lock query: %w", err)
+	}
+
+	// Fetch the current lock state regardless of outcome.
+	lock, err := s.GetLock(ctx, lockKey)
+	if err != nil {
+		return nil, fmt.Errorf("get lock after acquire: %w", err)
 	}
 
 	if res.RowsAffected == 0 {
 		// Lock is held by another deployment and not expired.
-		// Fetch the current lock holder for better error reporting.
-		lock, err := s.GetLock(ctx, lockKey)
-		if err != nil {
-			return fmt.Errorf("%w (failed to get lock holder: %v)", ErrLockHeld, err)
-		}
-		return fmt.Errorf("%w: held by deployment %s (owner: %s, expires: %s)",
-			ErrLockHeld, lock.DeploymentID, lock.Owner, lock.ExpiresAt.Format(time.RFC3339))
+		slog.Debug("Deployment lock held by another.",
+			"lock_key", lockKey,
+			"holder", lock.DeploymentID,
+			"owner", lock.Owner,
+			"expires", lock.ExpiresAt)
+		return &AcquireLockResult{
+			Acquired: false,
+			Lock:     lock,
+		}, nil
 	}
 
-	slog.Debug("Deployment lock acquired.", "lock_key", lockKey, "deployment_id", deploymentID, "owner", owner)
-	return nil
+	slog.Debug("Deployment lock acquired.",
+		"lock_key", lockKey,
+		"deployment_id", deploymentID,
+		"owner", owner,
+		"generation", lock.Generation)
+
+	return &AcquireLockResult{
+		Acquired: true,
+		Lock:     lock,
+	}, nil
 }
 
 // ReleaseLock releases a deployment lock if it is held by the given deployment.
@@ -86,31 +126,72 @@ func (s *Store) ReleaseLock(ctx context.Context, lockKey, deploymentID string) e
 }
 
 // RefreshLock extends the TTL of a lock held by the given deployment.
+// The generation must match the expected value to prevent stale refresh.
 // Returns ErrLockNotHeld if the lock is not held by this deployment.
-func (s *Store) RefreshLock(ctx context.Context, lockKey, deploymentID string, ttl time.Duration) error {
-	expiresAt := time.Now().Add(ttl)
+// Returns ErrLockLost if the generation doesn't match (lock was taken over).
+func (s *Store) RefreshLock(ctx context.Context, lockKey, deploymentID string, generation int64, ttl time.Duration) error {
+	ttlSeconds := int64(ttl.Seconds())
 
+	// Update only if deployment_id AND generation match (fencing).
+	// Use server-side time for consistency.
 	res, err := s.corro.ExecContext(ctx, `
 		UPDATE deployment_locks
-		SET expires_at = ?
-		WHERE lock_key = ? AND deployment_id = ?`,
-		expiresAt.UTC().Format(time.DateTime), lockKey, deploymentID)
+		SET expires_at = datetime('now', '+' || ? || ' seconds')
+		WHERE lock_key = ? AND deployment_id = ? AND generation = ?`,
+		ttlSeconds, lockKey, deploymentID, generation)
 	if err != nil {
 		return fmt.Errorf("refresh lock query: %w", err)
 	}
 
 	if res.RowsAffected == 0 {
+		// Check why it failed: lock doesn't exist, wrong owner, or wrong generation?
+		lock, err := s.GetLock(ctx, lockKey)
+		if err != nil {
+			return fmt.Errorf("check lock after failed refresh: %w", err)
+		}
+		if lock == nil {
+			return ErrLockNotHeld
+		}
+		if lock.DeploymentID != deploymentID {
+			return fmt.Errorf("%w: now held by %s", ErrLockLost, lock.DeploymentID)
+		}
+		if lock.Generation != generation {
+			return fmt.Errorf("%w: generation mismatch (expected %d, got %d)", ErrLockLost, generation, lock.Generation)
+		}
+		// Shouldn't happen, but fall back to generic error
 		return ErrLockNotHeld
 	}
 
-	slog.Debug("Deployment lock refreshed.", "lock_key", lockKey, "deployment_id", deploymentID)
+	slog.Debug("Deployment lock refreshed.",
+		"lock_key", lockKey,
+		"deployment_id", deploymentID,
+		"generation", generation)
+	return nil
+}
+
+// ValidateLock checks if the lock is still held by this deployment with the expected generation.
+// This can be called before critical operations to ensure the lock hasn't been lost.
+func (s *Store) ValidateLock(ctx context.Context, lockKey, deploymentID string, generation int64) error {
+	lock, err := s.GetLock(ctx, lockKey)
+	if err != nil {
+		return fmt.Errorf("get lock: %w", err)
+	}
+	if lock == nil {
+		return ErrLockNotHeld
+	}
+	if lock.DeploymentID != deploymentID {
+		return fmt.Errorf("%w: now held by %s", ErrLockLost, lock.DeploymentID)
+	}
+	if lock.Generation != generation {
+		return fmt.Errorf("%w: generation mismatch (expected %d, got %d)", ErrLockLost, generation, lock.Generation)
+	}
 	return nil
 }
 
 // GetLock returns the current lock for the given key, or nil if no lock exists.
 func (s *Store) GetLock(ctx context.Context, lockKey string) (*DeploymentLock, error) {
 	rows, err := s.corro.QueryContext(ctx, `
-		SELECT lock_key, deployment_id, owner, acquired_at, expires_at
+		SELECT lock_key, deployment_id, owner, generation, acquired_at, expires_at
 		FROM deployment_locks
 		WHERE lock_key = ?`,
 		lockKey)
@@ -128,7 +209,7 @@ func (s *Store) GetLock(ctx context.Context, lockKey string) (*DeploymentLock, e
 
 	var lock DeploymentLock
 	var acquiredAtStr, expiresAtStr string
-	if err = rows.Scan(&lock.LockKey, &lock.DeploymentID, &lock.Owner, &acquiredAtStr, &expiresAtStr); err != nil {
+	if err = rows.Scan(&lock.LockKey, &lock.DeploymentID, &lock.Owner, &lock.Generation, &acquiredAtStr, &expiresAtStr); err != nil {
 		return nil, fmt.Errorf("scan lock: %w", err)
 	}
 
@@ -143,8 +224,8 @@ func (s *Store) GetLock(ctx context.Context, lockKey string) (*DeploymentLock, e
 }
 
 // CleanupExpiredLocks removes all expired locks from the database.
-// This is useful for periodic cleanup, though locks are also cleaned up opportunistically
-// when new locks are acquired.
+// This is optional maintenance - correctness does not depend on it.
+// The acquire logic handles expired locks automatically.
 func (s *Store) CleanupExpiredLocks(ctx context.Context) (int64, error) {
 	res, err := s.corro.ExecContext(ctx, `
 		DELETE FROM deployment_locks

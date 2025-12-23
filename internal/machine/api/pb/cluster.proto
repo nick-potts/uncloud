@@ -24,6 +24,7 @@ service Cluster {
   rpc ReleaseDeploymentLock(ReleaseDeploymentLockRequest) returns (google.protobuf.Empty);
   rpc RefreshDeploymentLock(RefreshDeploymentLockRequest) returns (google.protobuf.Empty);
   rpc GetDeploymentLock(GetDeploymentLockRequest) returns (DeploymentLock);
+  rpc ValidateDeploymentLock(ValidateDeploymentLockRequest) returns (google.protobuf.Empty);
 }
 
 message AddMachineRequest {
@@ -111,10 +112,12 @@ message DeploymentLock {
   string deployment_id = 2;
   // owner identifies who holds the lock (e.g., machine ID or client identifier).
   string owner = 3;
+  // generation is a monotonically increasing fencing token. Operations must validate this matches.
+  int64 generation = 4;
   // acquired_at is when the lock was acquired (RFC3339 format).
-  string acquired_at = 4;
+  string acquired_at = 5;
   // expires_at is when the lock expires (RFC3339 format).
-  string expires_at = 5;
+  string expires_at = 6;
 }
 
 message AcquireDeploymentLockRequest {
@@ -143,9 +146,18 @@ message ReleaseDeploymentLockRequest {
 message RefreshDeploymentLockRequest {
   string lock_key = 1;
   string deployment_id = 2;
-  int64 ttl_seconds = 3;
+  // generation must match the current lock generation (fencing).
+  int64 generation = 3;
+  int64 ttl_seconds = 4;
 }
 
 message GetDeploymentLockRequest {
   string lock_key = 1;
+}
+
+message ValidateDeploymentLockRequest {
+  string lock_key = 1;
+  string deployment_id = 2;
+  // generation must match the current lock generation (fencing).
+  int64 generation = 3;
 }

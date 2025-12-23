@@ -46,7 +46,10 @@ CREATE TABLE deployment_locks
     deployment_id TEXT NOT NULL,
     -- owner identifies who holds the lock (e.g., machine ID or client identifier).
     owner         TEXT NOT NULL DEFAULT '',
-    -- acquired_at is when the lock was acquired.
+    -- generation is a monotonically increasing fencing token to prevent stale operations.
+    -- Each successful acquire increments this value. Operations must validate generation matches.
+    generation    INTEGER NOT NULL DEFAULT 0,
+    -- acquired_at is when the lock was acquired (server time for consistency).
     acquired_at   TIMESTAMP NOT NULL DEFAULT (datetime('now')),
     -- expires_at provides TTL for automatic lock release if the owner crashes.
     expires_at    TIMESTAMP NOT NULL

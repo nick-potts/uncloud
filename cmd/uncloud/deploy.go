@@ -25,6 +25,7 @@ type deployOptions struct {
 	profiles []string
 	services []string
 	noBuild  bool
+	noLock   bool
 	recreate bool
 	yes      bool
 }
@@ -56,6 +57,9 @@ func NewDeployCommand() *cobra.Command {
 		"Do not build new images before deploying services.")
 	cmd.Flags().BoolVar(&opts.BuildServicesOptions.NoCache, "no-cache", false,
 		"Do not use cache when building images.")
+	cmd.Flags().BoolVar(&opts.noLock, "no-lock", false,
+		"DANGEROUS: Disable deployment locking. Only use for emergencies when the lock system is unavailable.\n"+
+			"Concurrent deployments without locking may cause inconsistent state.")
 	cmd.Flags().StringSliceVarP(&opts.profiles, "profile", "p", nil,
 		"One or more Compose profiles to enable.")
 	cmd.Flags().BoolVar(&opts.recreate, "recreate", false,
@@ -155,9 +159,16 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 
 	// Create a deployment lock for the project to prevent concurrent deployments.
 	// The lock is acquired before planning to ensure we have a consistent view of cluster state.
-	hostname, _ := os.Hostname()
-	lockOwner := fmt.Sprintf("%s (pid %d)", hostname, os.Getpid())
-	projectLock := deploy.NewDeploymentLock(nil, deploy.ProjectLockKey(project.Name), lockOwner)
+	var projectLock *deploy.DeploymentLock
+	if opts.noLock {
+		projectLock = deploy.NewDisabledLock(deploy.ProjectLockKey(project.Name))
+	} else {
+		hostname, _ := os.Hostname()
+		lockOwner := fmt.Sprintf("%s (pid %d)", hostname, os.Getpid())
+		// TODO: Pass actual LockClient once gRPC methods are generated (run 'make proto').
+		// For now, passing nil will cause strict mode to fail with a helpful error.
+		projectLock = deploy.NewDeploymentLock(nil, deploy.ProjectLockKey(project.Name), lockOwner)
+	}
 
 	// Acquire the lock before creating the deployment plan.
 	if err := projectLock.Acquire(ctx); err != nil {
