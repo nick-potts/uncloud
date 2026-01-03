@@ -327,6 +327,119 @@ func (c *Cluster) ListMachines(ctx context.Context, _ *emptypb.Empty) (*pb.ListM
 	return &pb.ListMachinesResponse{Machines: members}, nil
 }
 
+// VerifySubnetAllocation checks if this machine's subnet collides with another machine after
+// replication has synced. If a collision is detected, the machine with the lexicographically
+// higher ID reassigns itself to a new subnet. Returns the (possibly new) subnet and whether
+// a reassignment occurred.
+//
+// This handles eventual consistency races where two machines joining simultaneously may
+// both allocate the same subnet before seeing each other's writes.
+func (c *Cluster) VerifySubnetAllocation(ctx context.Context, machineID string) (netip.Prefix, bool, error) {
+	machine, err := c.store.GetMachine(ctx, machineID)
+	if err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("get machine: %w", err)
+	}
+	mySubnet, err := machine.Network.Subnet.ToPrefix()
+	if err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("parse subnet: %w", err)
+	}
+
+	machines, err := c.store.ListMachines(ctx)
+	if err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("list machines: %w", err)
+	}
+
+	// Check for collision - another machine with same subnet but different ID
+	var collidingMachine *pb.MachineInfo
+	allocatedSubnets := make([]netip.Prefix, 0, len(machines))
+	for _, m := range machines {
+		subnet, _ := m.Network.Subnet.ToPrefix()
+		if m.Id != machineID {
+			allocatedSubnets = append(allocatedSubnets, subnet)
+			if subnet == mySubnet {
+				collidingMachine = m
+			}
+		}
+	}
+
+	if collidingMachine == nil {
+		// No collision, we're good
+		return mySubnet, false, nil
+	}
+
+	// Collision detected! The machine with the higher ID (lexicographically) must reassign.
+	// This is deterministic so both machines will agree on who moves.
+	if machineID < collidingMachine.Id {
+		// We have the lower ID, we keep our subnet. The other machine will reassign.
+		slog.Info("Subnet collision detected, other machine will reassign",
+			"my_id", machineID, "other_id", collidingMachine.Id, "subnet", mySubnet)
+		return mySubnet, false, nil
+	}
+
+	// We have the higher ID, we must reassign
+	slog.Warn("Subnet collision detected, reassigning to new subnet",
+		"my_id", machineID, "other_id", collidingMachine.Id, "colliding_subnet", mySubnet)
+
+	clusterNetwork, err := c.Network(ctx)
+	if err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("get cluster network: %w", err)
+	}
+
+	ipam, err := NewIPAMWithAllocated(clusterNetwork, allocatedSubnets)
+	if err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("create IPAM manager: %w", err)
+	}
+	newSubnet, err := ipam.AllocateSubnetLen(DefaultSubnetBits)
+	if err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("allocate new subnet: %w", err)
+	}
+
+	// Update our machine with the new subnet
+	machine.Network.Subnet = pb.NewIPPrefix(newSubnet)
+	if err := c.store.UpdateMachine(ctx, machine); err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("update machine subnet: %w", err)
+	}
+
+	slog.Info("Subnet reassigned after collision", "machine_id", machineID, "new_subnet", newSubnet)
+	return newSubnet, true, nil
+}
+
+// WatchSubnetCollisions subscribes to machine changes via Corrosion and automatically
+// resolves subnet collisions. Runs until context is cancelled.
+//
+// The onReassign callback is invoked when this machine's subnet changes, allowing the
+// caller to reconfigure networking (Docker, WireGuard, etc).
+func (c *Cluster) WatchSubnetCollisions(ctx context.Context, machineID string, onReassign func(newSubnet netip.Prefix)) error {
+	_, changes, err := c.store.SubscribeMachines(ctx)
+	if err != nil {
+		return fmt.Errorf("subscribe to machines: %w", err)
+	}
+
+	// Check immediately on start
+	if newSubnet, reassigned, err := c.VerifySubnetAllocation(ctx, machineID); err != nil {
+		slog.Error("Failed initial subnet collision check", "err", err)
+	} else if reassigned && onReassign != nil {
+		onReassign(newSubnet)
+	}
+
+	// Watch for changes via Corrosion subscription
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case _, ok := <-changes:
+			if !ok {
+				return fmt.Errorf("machines subscription closed")
+			}
+			if newSubnet, reassigned, err := c.VerifySubnetAllocation(ctx, machineID); err != nil {
+				slog.Error("Failed subnet collision check", "err", err)
+			} else if reassigned && onReassign != nil {
+				onReassign(newSubnet)
+			}
+		}
+	}
+}
+
 // RemoveMachine removes a machine from the cluster.
 func (c *Cluster) RemoveMachine(ctx context.Context, req *pb.RemoveMachineRequest) (*emptypb.Empty, error) {
 	if err := c.checkInitialised(ctx); err != nil {
