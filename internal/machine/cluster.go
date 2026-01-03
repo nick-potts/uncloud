@@ -14,6 +14,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	"github.com/psviderski/uncloud/internal/machine/caddyconfig"
+	"github.com/psviderski/uncloud/internal/machine/cluster"
 	"github.com/psviderski/uncloud/internal/machine/constants"
 	"github.com/psviderski/uncloud/internal/machine/corroservice"
 	"github.com/psviderski/uncloud/internal/machine/dns"
@@ -30,8 +31,9 @@ import (
 // the WireGuard network, API server listening the WireGuard network, Corrosion service, Docker network and containers,
 // and others.
 type clusterController struct {
-	state *State
-	store *store.Store
+	state   *State
+	store   *store.Store
+	cluster *cluster.Cluster
 
 	wgnet           *network.WireGuardNetwork
 	endpointChanges <-chan network.EndpointChangeEvent
@@ -56,6 +58,7 @@ type clusterController struct {
 func newClusterController(
 	state *State,
 	store *store.Store,
+	clusterSvc *cluster.Cluster,
 	server *grpc.Server,
 	corroService corroservice.Service,
 	dockerService *docker.Service,
@@ -75,6 +78,7 @@ func newClusterController(
 	return &clusterController{
 		state:           state,
 		store:           store,
+		cluster:         clusterSvc,
 		wgnet:           wgnet,
 		endpointChanges: endpointChanges,
 		server:          server,
@@ -165,6 +169,15 @@ func (cc *clusterController) Run(ctx context.Context) error {
 	errGroup.Go(func() error {
 		if err := cc.handleMachineChanges(ctx); err != nil {
 			return fmt.Errorf("handle new machines: %w", err)
+		}
+		return nil
+	})
+
+	// Watch for subnet collisions that may occur when multiple machines join simultaneously.
+	// When a collision is detected, the machine with the higher ID reassigns itself.
+	errGroup.Go(func() error {
+		if err := cc.cluster.WatchSubnetCollisions(ctx, cc.state.ID, cc.reconfigureSubnet); err != nil {
+			return fmt.Errorf("watch subnet collisions: %w", err)
 		}
 		return nil
 	})
@@ -279,6 +292,44 @@ func (cc *clusterController) ensureDockerNetwork(ctx context.Context) error {
 	close(cc.dockerReady)
 
 	return nil
+}
+
+// reconfigureSubnet handles subnet reassignment after a collision is detected.
+// It updates the local state, reconfigures the Docker network, and updates WireGuard.
+func (cc *clusterController) reconfigureSubnet(newSubnet netip.Prefix) {
+	slog.Info("Reconfiguring network with new subnet after collision resolution.", "new_subnet", newSubnet)
+
+	// Update local state with the new subnet.
+	cc.state.mu.Lock()
+	oldSubnet := cc.state.Network.Subnet
+	cc.state.Network.Subnet = newSubnet
+	if err := cc.state.Save(); err != nil {
+		slog.Error("Failed to save machine state after subnet reassignment.", "err", err)
+		cc.state.Network.Subnet = oldSubnet // Rollback on failure
+		cc.state.mu.Unlock()
+		return
+	}
+	cc.state.mu.Unlock()
+
+	// Reconfigure the Docker network with the new subnet.
+	// This will remove and recreate the network if the subnet changed.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := cc.dockerCtrl.EnsureUncloudNetwork(ctx, newSubnet, cc.dnsServer.ListenAddr()); err != nil {
+		slog.Error("Failed to reconfigure Docker network after subnet reassignment.", "err", err)
+		return
+	}
+	slog.Info("Docker network reconfigured with new subnet.", "subnet", newSubnet)
+
+	// Reconfigure WireGuard with the new subnet.
+	cc.state.mu.RLock()
+	defer cc.state.mu.RUnlock()
+	if err := cc.wgnet.Configure(*cc.state.Network); err != nil {
+		slog.Error("Failed to reconfigure WireGuard after subnet reassignment.", "err", err)
+		return
+	}
+	slog.Info("WireGuard reconfigured with new subnet.", "subnet", newSubnet)
 }
 
 // syncDockerContainers watches local Docker containers and syncs them to the cluster store.

@@ -471,6 +471,7 @@ func (m *Machine) Run(ctx context.Context) error {
 			m.clusterCtrl, err = newClusterController(
 				m.state,
 				m.store,
+				m.cluster,
 				proxyServer,
 				m.config.CorrosionService,
 				m.dockerService,
