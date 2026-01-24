@@ -11,8 +11,6 @@ import (
 	"github.com/psviderski/uncloud/internal/version"
 	"github.com/psviderski/uncloud/pkg/client"
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func NewVersionCommand() *cobra.Command {
@@ -45,7 +43,7 @@ func runVersion(ctx context.Context, uncli *cli.CLI) error {
 	}
 	defer clusterClient.Close()
 
-	// List all machines in the cluster.
+	// List all machines in the cluster to get their states.
 	machines, err := clusterClient.ListMachines(ctx, nil)
 	if err != nil {
 		fmt.Println("Cluster: (unavailable)")
@@ -57,6 +55,12 @@ func runVersion(ctx context.Context, uncli *cli.CLI) error {
 		return nil
 	}
 
+	// Broadcast InspectMachine to all available machines to get their versions.
+	versions, err := inspectMachineVersions(ctx, clusterClient)
+	if err != nil {
+		return fmt.Errorf("inspect machine versions: %w", err)
+	}
+
 	// Print machine versions in a table format.
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	if _, err = fmt.Fprintln(tw, "MACHINE\tSTATE\tVERSION"); err != nil {
@@ -66,7 +70,11 @@ func runVersion(ctx context.Context, uncli *cli.CLI) error {
 	for _, m := range machines {
 		machineName := m.Machine.Name
 		state := capitaliseState(m.State)
-		ver := getMachineVersion(ctx, clusterClient, m)
+
+		ver := "(unreachable)"
+		if v, ok := versions[machineName]; ok {
+			ver = v
+		}
 
 		if _, err = fmt.Fprintf(tw, "%s\t%s\t%s\n", machineName, state, ver); err != nil {
 			return fmt.Errorf("write row: %w", err)
@@ -76,30 +84,49 @@ func runVersion(ctx context.Context, uncli *cli.CLI) error {
 	return tw.Flush()
 }
 
-// getMachineVersion retrieves the version from a specific machine, handling various error cases.
-func getMachineVersion(ctx context.Context, c *client.Client, m *pb.MachineMember) string {
-	// Skip machines that are DOWN since we can't connect to them.
-	if m.State == pb.MachineMember_DOWN {
-		return "(unreachable)"
-	}
-
-	// Proxy the request to the specific machine.
-	machineCtx := c.ProxyToMachine(ctx, m)
-
-	ver, err := c.GetVersion(machineCtx)
+// inspectMachineVersions broadcasts InspectMachine to all available machines and returns a map of machine name to version.
+func inspectMachineVersions(ctx context.Context, c *client.Client) (map[string]string, error) {
+	// Create a context that proxies to all available (non-DOWN) machines.
+	proxyCtx, availableMachines, err := c.ProxyMachinesContext(ctx, nil)
 	if err != nil {
-		// Check if the machine is running an older version that doesn't have GetVersion.
-		if status.Code(err) == codes.Unimplemented {
-			return "(unknown - daemon version < 0.17)"
-		}
-		// Handle connection errors or other issues.
-		if status.Code(err) == codes.Unavailable {
-			return "(unreachable)"
-		}
-		return fmt.Sprintf("(error: %v)", err)
+		return nil, fmt.Errorf("proxy machines context: %w", err)
 	}
 
-	return versionOrDev(ver)
+	// Build a map of management IP to machine name for resolving response metadata.
+	machineNamesByIP := make(map[string]string)
+	for _, m := range availableMachines {
+		if addr, err := m.Machine.Network.ManagementIp.ToAddr(); err == nil {
+			machineNamesByIP[addr.String()] = m.Machine.Name
+		}
+	}
+
+	// Broadcast InspectMachine to all machines.
+	resp, err := c.MachineClient.InspectMachine(proxyCtx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("inspect machines: %w", err)
+	}
+
+	versions := make(map[string]string)
+	for _, details := range resp.Machines {
+		var machineName string
+		if details.Metadata != nil {
+			machineName = machineNamesByIP[details.Metadata.Machine]
+			if details.Metadata.Error != "" {
+				client.PrintWarning(fmt.Sprintf("failed to get version from machine %s: %s",
+					machineName, details.Metadata.Error))
+				continue
+			}
+		} else if len(resp.Machines) == 1 && len(availableMachines) == 1 {
+			// Single machine response without metadata.
+			machineName = availableMachines[0].Machine.Name
+		}
+
+		if machineName != "" {
+			versions[machineName] = versionOrDev(details.DaemonVersion)
+		}
+	}
+
+	return versions, nil
 }
 
 // versionOrDev returns "(dev)" if the version is empty, otherwise returns the version as-is.
