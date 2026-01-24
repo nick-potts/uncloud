@@ -78,6 +78,11 @@ func proxyToMachine(ctx context.Context, machine *pb.MachineInfo) context.Contex
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
+// ProxyToMachine returns a new context that proxies gRPC requests to the specified machine.
+func (cli *Client) ProxyToMachine(ctx context.Context, machine *pb.MachineMember) context.Context {
+	return proxyToMachine(ctx, machine.Machine)
+}
+
 // ProxyMachinesContext returns a new context that proxies gRPC requests to the specified machines.
 // If namesOrIDs is nil, all machines are included.
 func (cli *Client) ProxyMachinesContext(
