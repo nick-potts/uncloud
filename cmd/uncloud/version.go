@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/psviderski/uncloud/internal/cli"
-	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	"github.com/psviderski/uncloud/internal/version"
 	"github.com/psviderski/uncloud/pkg/client"
 	"github.com/spf13/cobra"
@@ -69,7 +69,7 @@ func runVersion(ctx context.Context, uncli *cli.CLI) error {
 
 	for _, m := range machines {
 		machineName := m.Machine.Name
-		state := capitaliseState(m.State)
+		state := capitalise(m.State.String())
 
 		ver := "(unreachable)"
 		if v, ok := versions[machineName]; ok {
@@ -137,16 +137,10 @@ func versionOrDev(v string) string {
 	return v
 }
 
-// capitaliseState returns a human-readable state string.
-func capitaliseState(state pb.MachineMember_MembershipState) string {
-	switch state {
-	case pb.MachineMember_UP:
-		return "Up"
-	case pb.MachineMember_SUSPECT:
-		return "Suspect"
-	case pb.MachineMember_DOWN:
-		return "Down"
-	default:
-		return "Unknown"
+// capitalise returns a string where the first character is upper case, and the rest is lower case.
+func capitalise(s string) string {
+	if s == "" {
+		return ""
 	}
+	return strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
 }
