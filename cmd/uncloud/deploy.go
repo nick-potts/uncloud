@@ -10,6 +10,7 @@ import (
 	composecli "github.com/compose-spec/compose-go/v2/cli"
 	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/psviderski/uncloud/internal/cli"
+	clideploy "github.com/psviderski/uncloud/internal/cli/deploy"
 	"github.com/psviderski/uncloud/pkg/api"
 	"github.com/psviderski/uncloud/pkg/client"
 	"github.com/psviderski/uncloud/pkg/client/compose"
@@ -191,7 +192,10 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 	}
 
 	return progress.RunWithTitle(ctx, func(ctx context.Context) error {
-		if err := plan.Execute(ctx, clusterClient); err != nil {
+		observer := clideploy.NewProgressObserver(progress.ContextWriter(ctx))
+		executor := deploy.NewExecutor(clusterClient, observer)
+
+		if err := executor.ExecuteSequence(ctx, &plan); err != nil {
 			return fmt.Errorf("deploy services: %w", err)
 		}
 		return nil

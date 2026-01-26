@@ -17,9 +17,36 @@ type Client interface {
 	VolumeClient
 }
 
+// ImagePullProgress contains progress information for an image pull operation.
+type ImagePullProgress struct {
+	// LayerID is the ID of the layer being processed (empty for overall status).
+	LayerID string
+	// Status describes the current operation (e.g., "Downloading", "Extracting").
+	Status string
+	// Current is the number of bytes completed for this layer.
+	Current int64
+	// Total is the total number of bytes for this layer.
+	Total int64
+	// Percent is the completion percentage (0-100) for this layer.
+	Percent int
+	// Done indicates this layer has completed.
+	Done bool
+	// Error is set if the pull failed.
+	Error error
+}
+
+// ImagePullCallback is called with progress updates during image pulling.
+type ImagePullCallback func(ImagePullProgress)
+
+// CreateContainerOptions contains options for creating a container.
+type CreateContainerOptions struct {
+	// OnPullProgress is called with progress updates if an image needs to be pulled.
+	OnPullProgress ImagePullCallback
+}
+
 type ContainerClient interface {
 	CreateContainer(
-		ctx context.Context, serviceID string, spec ServiceSpec, machineID string,
+		ctx context.Context, serviceID string, spec ServiceSpec, machineID string, opts CreateContainerOptions,
 	) (container.CreateResponse, error)
 	InspectContainer(ctx context.Context, serviceNameOrID, containerNameOrID string) (MachineServiceContainer, error)
 	RemoveContainer(ctx context.Context, serviceNameOrID, containerNameOrID string, opts container.RemoveOptions) error

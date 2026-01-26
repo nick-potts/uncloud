@@ -7,6 +7,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/pkg/stringid"
 	"github.com/psviderski/uncloud/pkg/api"
 )
 
@@ -33,13 +34,14 @@ type NameResolver interface {
 
 // RunContainerOperation creates and starts a new container on a specific machine.
 type RunContainerOperation struct {
-	ServiceID string
-	Spec      api.ServiceSpec
-	MachineID string
+	ServiceID  string
+	Spec       api.ServiceSpec
+	MachineID  string
+	CreateOpts api.CreateContainerOptions
 }
 
 func (o *RunContainerOperation) Execute(ctx context.Context, cli Client) error {
-	resp, err := cli.CreateContainer(ctx, o.ServiceID, o.Spec, o.MachineID)
+	resp, err := cli.CreateContainer(ctx, o.ServiceID, o.Spec, o.MachineID, o.CreateOpts)
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
@@ -60,6 +62,19 @@ func (o *RunContainerOperation) Format(resolver NameResolver) string {
 func (o *RunContainerOperation) String() string {
 	return fmt.Sprintf("RunContainerOperation[machine_id=%s service_id=%s image=%s]",
 		o.MachineID, o.ServiceID, o.Spec.Container.Image)
+}
+
+// SpanInfo returns display metadata for the run container operation.
+func (o *RunContainerOperation) SpanInfo(machineNames map[string]string) SpanInfo {
+	machine := machineNames[o.MachineID]
+	if machine == "" {
+		machine = stringid.TruncateID(o.MachineID)
+	}
+	return SpanInfo{
+		DisplayID:   fmt.Sprintf("Container on %s", machine),
+		RunningText: "Creating",
+		DoneText:    "Created",
+	}
 }
 
 // StopContainerOperation stops a container on a specific machine.
@@ -85,6 +100,19 @@ func (o *StopContainerOperation) Format(resolver NameResolver) string {
 func (o *StopContainerOperation) String() string {
 	return fmt.Sprintf("StopContainerOperation[machine_id=%s service_id=%s container_id=%s]",
 		o.MachineID, o.ServiceID, o.ContainerID)
+}
+
+// SpanInfo returns display metadata for the stop container operation.
+func (o *StopContainerOperation) SpanInfo(machineNames map[string]string) SpanInfo {
+	machine := machineNames[o.MachineID]
+	if machine == "" {
+		machine = stringid.TruncateID(o.MachineID)
+	}
+	return SpanInfo{
+		DisplayID:   fmt.Sprintf("Container %s on %s", stringid.TruncateID(o.ContainerID), machine),
+		RunningText: "Stopping",
+		DoneText:    "Stopped",
+	}
 }
 
 // RemoveContainerOperation stops and removes a container from a specific machine.
@@ -116,6 +144,19 @@ func (o *RemoveContainerOperation) Format(resolver NameResolver) string {
 func (o *RemoveContainerOperation) String() string {
 	return fmt.Sprintf("RemoveContainerOperation[machine_id=%s service_id=%s container_id=%s]",
 		o.MachineID, o.Container.ServiceID(), o.Container.ID)
+}
+
+// SpanInfo returns display metadata for the remove container operation.
+func (o *RemoveContainerOperation) SpanInfo(machineNames map[string]string) SpanInfo {
+	machine := machineNames[o.MachineID]
+	if machine == "" {
+		machine = stringid.TruncateID(o.MachineID)
+	}
+	return SpanInfo{
+		DisplayID:   fmt.Sprintf("Container %s on %s", o.Container.ShortID(), machine),
+		RunningText: "Removing",
+		DoneText:    "Removed",
+	}
 }
 
 // CreateVolumeOperation creates a volume on a specific machine.
@@ -156,6 +197,23 @@ func (o *CreateVolumeOperation) Format(_ NameResolver) string {
 func (o *CreateVolumeOperation) String() string {
 	return fmt.Sprintf("CreateVolumeOperation[machine_id=%s volume=%s]",
 		o.MachineID, o.VolumeSpec.DockerVolumeName())
+}
+
+// SpanInfo returns display metadata for the create volume operation.
+func (o *CreateVolumeOperation) SpanInfo(machineNames map[string]string) SpanInfo {
+	machine := o.MachineName
+	if machine == "" {
+		machine = machineNames[o.MachineID]
+	}
+	if machine == "" {
+		machine = stringid.TruncateID(o.MachineID)
+	}
+	return SpanInfo{
+		DisplayID:   fmt.Sprintf("Volume %s on %s", o.VolumeSpec.DockerVolumeName(), machine),
+		IsTopLevel:  true, // Volumes appear at root level, not nested under services
+		RunningText: "Creating",
+		DoneText:    "Created",
+	}
 }
 
 // SequenceOperation is a composite operation that executes a sequence of operations in order.

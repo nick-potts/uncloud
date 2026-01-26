@@ -1289,7 +1289,7 @@ func TestServiceLifecycle(t *testing.T) {
 			},
 		}
 
-		resp, err := cli.CreateContainer(ctx, serviceID, spec, c.Machines[0].Name)
+		resp, err := cli.CreateContainer(ctx, serviceID, spec, c.Machines[0].Name, api.CreateContainerOptions{})
 		require.NoError(t, err)
 		assert.NotEmpty(t, resp.ID)
 
@@ -1425,7 +1425,7 @@ func TestServiceLifecycle(t *testing.T) {
 			})
 		}
 
-		resp, err := cli.CreateContainer(ctx, serviceID, spec, c.Machines[0].Name)
+		resp, err := cli.CreateContainer(ctx, serviceID, spec, c.Machines[0].Name, api.CreateContainerOptions{})
 		require.NoError(t, err)
 		assert.NotEmpty(t, resp.ID)
 
@@ -1454,7 +1454,7 @@ func TestServiceLifecycle(t *testing.T) {
 		}
 
 		for _, invalidID := range invalidIDs {
-			_, err := cli.CreateContainer(ctx, invalidID, spec, c.Machines[0].Name)
+			_, err := cli.CreateContainer(ctx, invalidID, spec, c.Machines[0].Name, api.CreateContainerOptions{})
 			require.ErrorContains(t, err, "invalid service ID")
 		}
 	})
@@ -1470,7 +1470,7 @@ func TestServiceLifecycle(t *testing.T) {
 			},
 		}
 
-		ctr, err := cli.CreateContainer(ctx, serviceID, spec, c.Machines[0].Name)
+		ctr, err := cli.CreateContainer(ctx, serviceID, spec, c.Machines[0].Name, api.CreateContainerOptions{})
 		require.NoError(t, err)
 		assert.NotEmpty(t, ctr.ID)
 

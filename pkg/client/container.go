@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/containerd/errdefs"
-	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/psviderski/uncloud/internal/docker"
@@ -19,7 +18,7 @@ import (
 
 // CreateContainer creates a new container for the given service on the specified machine.
 func (cli *Client) CreateContainer(
-	ctx context.Context, serviceID string, spec api.ServiceSpec, machineID string,
+	ctx context.Context, serviceID string, spec api.ServiceSpec, machineID string, opts api.CreateContainerOptions,
 ) (container.CreateResponse, error) {
 	var resp container.CreateResponse
 
@@ -43,12 +42,8 @@ func (cli *Client) CreateContainer(
 	// Proxy Docker gRPC requests to the selected machine.
 	ctx = proxyToMachine(ctx, machine.Machine)
 
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", containerName, machine.Machine.Name)
-	pw.Event(progress.CreatingEvent(eventID))
-
 	if spec.Container.PullPolicy == api.PullPolicyAlways {
-		if err = cli.pullImageWithProgress(ctx, spec.Container.Image, machine.Machine.Name, eventID); err != nil {
+		if err = cli.pullImage(ctx, spec.Container.Image, opts.OnPullProgress); err != nil {
 			return resp, err
 		}
 	}
@@ -69,28 +64,19 @@ func (cli *Client) CreateContainer(
 		}
 
 		// Pull the missing image and create the container again.
-		if err = cli.pullImageWithProgress(ctx, spec.Container.Image, machine.Machine.Name, eventID); err != nil {
+		if err = cli.pullImage(ctx, spec.Container.Image, opts.OnPullProgress); err != nil {
 			return resp, err
 		}
 		if resp, err = cli.Docker.CreateServiceContainer(ctx, serviceID, spec, containerName); err != nil {
 			return resp, err
 		}
 	}
-	pw.Event(progress.CreatedEvent(eventID))
 
 	return resp, nil
 }
 
-func (cli *Client) pullImageWithProgress(ctx context.Context, image, machineName, parentEventID string) error {
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Image %s on %s", image, machineName)
-	pw.Event(progress.Event{
-		ID:         eventID,
-		ParentID:   parentEventID,
-		Status:     progress.Working,
-		StatusText: "Pulling",
-	})
-
+// pullImage pulls an image from the registry, calling the optional callback with progress updates.
+func (cli *Client) pullImage(ctx context.Context, image string, onProgress api.ImagePullCallback) error {
 	opts := machinedocker.PullOptions{}
 	// Try to retrieve the authentication token for the image from the default local Docker config file.
 	if encodedAuth, err := docker.RetrieveLocalDockerRegistryAuth(image); err == nil {
@@ -101,101 +87,83 @@ func (cli *Client) pullImageWithProgress(ctx context.Context, image, machineName
 	pullCh, err := cli.Docker.PullImage(ctx, image, opts)
 	if err != nil {
 		statusErr := status.Convert(err)
-		pw.Event(progress.Event{
-			ID:         eventID,
-			ParentID:   parentEventID,
-			Text:       "Error",
-			Status:     progress.Error,
-			StatusText: statusErr.Message(),
-		})
-		return fmt.Errorf("pull image: %w", errors.New(statusErr.Message()))
+		pullErr := fmt.Errorf("pull image: %w", errors.New(statusErr.Message()))
+		if onProgress != nil {
+			onProgress(api.ImagePullProgress{Error: pullErr})
+		}
+		return pullErr
 	}
 
-	// Wait for pull to complete by reading all progress messages and converting them to events.
+	// Wait for pull to complete by reading all progress messages.
+	var receivedDone bool
 	for msg := range pullCh {
 		if msg.Err != nil {
 			err = msg.Err
-		} else {
-			if msg.Message.Error != nil {
-				err = errors.New(msg.Message.Error.Message)
-			}
+		} else if msg.Message.Error != nil {
+			err = errors.New(msg.Message.Error.Message)
 		}
 		if err != nil {
 			statusErr := status.Convert(err)
-			pw.Event(progress.Event{
-				ID:         eventID,
-				ParentID:   parentEventID,
-				Text:       "Error",
-				Status:     progress.Error,
-				StatusText: statusErr.Message(),
-			})
-			return fmt.Errorf("pull image: %w", errors.New(statusErr.Message()))
+			pullErr := fmt.Errorf("pull image: %w", errors.New(statusErr.Message()))
+			if onProgress != nil {
+				onProgress(api.ImagePullProgress{Error: pullErr})
+			}
+			return pullErr
 		}
 
-		// TODO: add like in compose: --quiet-pull Pull without printing progress information
-		e := toPullProgressEvent(msg.Message)
-		if e != nil {
-			e.ID = fmt.Sprintf("%s on %s", e.ID, machineName)
-			e.ParentID = eventID
-			// Grand children events are not printed by the tty progress writer but they are still required
-			// to calculate the progress line of their parent.
-			pw.Event(*e)
+		if onProgress != nil {
+			progress := toPullProgress(msg.Message)
+			if progress != nil {
+				onProgress(*progress)
+				if progress.Done {
+					receivedDone = true
+				}
+			}
 		}
 	}
-	pw.Event(progress.Event{
-		ID:         eventID,
-		ParentID:   parentEventID,
-		Status:     progress.Done,
-		StatusText: "Pulled",
-	})
+
+	// Ensure we emit a final Done signal if the Docker API didn't send one.
+	// This can happen with cached images or certain Docker versions.
+	if onProgress != nil && !receivedDone {
+		onProgress(api.ImagePullProgress{Done: true, Percent: 100, Status: "Pulled"})
+	}
 
 	return nil
 }
 
-// toPullProgressEvent converts a JSON progress message from the Docker API to a progress event.
-// It's based on toPullProgressEvent from Docker Compose.
-func toPullProgressEvent(jm jsonmessage.JSONMessage) *progress.Event {
-	if jm.ID == "" || jm.Progress == nil {
+// toPullProgress converts a JSON progress message from the Docker API to ImagePullProgress.
+func toPullProgress(jm jsonmessage.JSONMessage) *api.ImagePullProgress {
+	if jm.ID == "" {
 		return nil
 	}
 
-	var (
-		total   int64
-		percent int
-		current int64
-	)
-	text := jm.Progress.String()
-	stat := progress.Working
-
-	switch jm.Status {
-	case "Preparing", "Waiting", "Pulling fs layer":
-		percent = 0
-	case "Downloading", "Extracting", "Verifying Checksum":
-		current = jm.Progress.Current
-		total = jm.Progress.Total
-		if jm.Progress.Total > 0 {
-			percent = int(jm.Progress.Current * 100 / jm.Progress.Total)
-		}
-	case "Download complete", "Already exists", "Pull complete":
-		stat = progress.Done
-		percent = 100
+	p := &api.ImagePullProgress{
+		LayerID: jm.ID,
+		Status:  jm.Status,
 	}
 
+	if jm.Progress != nil {
+		p.Current = jm.Progress.Current
+		p.Total = jm.Progress.Total
+		if jm.Progress.Total > 0 {
+			p.Percent = int(jm.Progress.Current * 100 / jm.Progress.Total)
+		}
+	}
+
+	// Per-layer completion messages (don't set Done, these are just layer progress).
+	switch jm.Status {
+	case "Download complete", "Already exists", "Pull complete":
+		p.Percent = 100
+	}
+
+	// Overall image pull completion messages (set Done to signal the entire pull is finished).
 	if strings.Contains(jm.Status, "Image is up to date") ||
 		strings.Contains(jm.Status, "Downloaded newer image") {
-		stat = progress.Done
-		percent = 100
+		p.Done = true
+		p.Percent = 100
 	}
 
-	return &progress.Event{
-		ID:         jm.ID,
-		Current:    current,
-		Total:      total,
-		Percent:    percent,
-		Text:       jm.Status,
-		Status:     stat,
-		StatusText: text,
-	}
+	return p
 }
 
 // InspectContainer returns the information about the specified container within the service.
@@ -243,16 +211,7 @@ func (cli *Client) StartContainer(ctx context.Context, serviceNameOrID, containe
 	}
 	ctx = proxyToMachine(ctx, machine.Machine)
 
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", ctr.Container.Name, machine.Machine.Name)
-
-	pw.Event(progress.StartingEvent(eventID))
-	if err = cli.Docker.StartContainer(ctx, ctr.Container.ID, container.StartOptions{}); err != nil {
-		return err
-	}
-	pw.Event(progress.StartedEvent(eventID))
-
-	return nil
+	return cli.Docker.StartContainer(ctx, ctr.Container.ID, container.StartOptions{})
 }
 
 // StopContainer stops the specified container within the service.
@@ -270,16 +229,7 @@ func (cli *Client) StopContainer(
 	}
 	ctx = proxyToMachine(ctx, machine.Machine)
 
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", ctr.Container.Name, machine.Machine.Name)
-
-	pw.Event(progress.StoppingEvent(eventID))
-	if err = cli.Docker.StopContainer(ctx, ctr.Container.ID, opts); err != nil {
-		return err
-	}
-	pw.Event(progress.StoppedEvent(eventID))
-
-	return nil
+	return cli.Docker.StopContainer(ctx, ctr.Container.ID, opts)
 }
 
 // RemoveContainer removes the specified container within the service.
@@ -297,16 +247,7 @@ func (cli *Client) RemoveContainer(
 	}
 	ctx = proxyToMachine(ctx, machine.Machine)
 
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", ctr.Container.Name, machine.Machine.Name)
-
-	pw.Event(progress.RemovingEvent(eventID))
-	if err = cli.Docker.RemoveServiceContainer(ctx, ctr.Container.ID, opts); err != nil {
-		return err
-	}
-	pw.Event(progress.RemovedEvent(eventID))
-
-	return nil
+	return cli.Docker.RemoveServiceContainer(ctx, ctr.Container.ID, opts)
 }
 
 // ExecContainer executes a command in a container within the service.

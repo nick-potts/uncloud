@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/containerd/errdefs"
-	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	"github.com/psviderski/uncloud/pkg/api"
@@ -28,10 +27,6 @@ func (cli *Client) CreateVolume(
 	// Proxy Docker gRPC requests to the selected machine.
 	ctx = proxyToMachine(ctx, machine.Machine)
 
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Volume %s on %s", opts.Name, machine.Machine.Name)
-	pw.Event(progress.CreatingEvent(eventID))
-
 	vol, err := cli.Docker.CreateVolume(ctx, opts)
 	if err != nil {
 		return resp, err
@@ -42,7 +37,6 @@ func (cli *Client) CreateVolume(
 		MachineName: machine.Machine.Name,
 		Volume:      vol,
 	}
-	pw.Event(progress.CreatedEvent(eventID))
 
 	return resp, nil
 }
@@ -118,17 +112,12 @@ func (cli *Client) RemoveVolume(ctx context.Context, machineNameOrID, volumeName
 	// Proxy Docker gRPC requests to the selected machine.
 	ctx = proxyToMachine(ctx, machine.Machine)
 
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Volume %s on %s", volumeName, machine.Machine.Name)
-	pw.Event(progress.RemovingEvent(eventID))
-
 	if err = cli.Docker.RemoveVolume(ctx, volumeName, force); err != nil {
 		if errdefs.IsNotFound(err) {
 			return api.ErrNotFound
 		}
 		return err
 	}
-	pw.Event(progress.RemovedEvent(eventID))
 
 	return nil
 }
