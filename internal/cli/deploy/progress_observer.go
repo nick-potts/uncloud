@@ -5,52 +5,31 @@ import (
 	"github.com/psviderski/uncloud/pkg/client/deploy"
 )
 
-// ProgressObserver adapts span events to docker compose progress events.
-// It simply maps Span.Display fields to progress.Event fields.
+// ProgressObserver adapts deploy events to docker compose progress events.
 type ProgressObserver struct {
 	writer progress.Writer
 }
 
 // NewProgressObserver creates a new ProgressObserver.
 func NewProgressObserver(w progress.Writer) *ProgressObserver {
-	return &ProgressObserver{
-		writer: w,
-	}
+	return &ProgressObserver{writer: w}
 }
 
-func (p *ProgressObserver) OnSpanStart(s *deploy.Span) {
+// OnEvent converts a deploy event to a progress event.
+func (p *ProgressObserver) OnEvent(e deploy.Event) {
 	p.writer.Event(progress.Event{
-		ID:         s.Display.ID,
-		ParentID:   s.Display.ParentID,
-		Status:     progress.Working,
-		StatusText: s.Display.Text,
+		ID:         e.ID,
+		ParentID:   e.ParentID,
+		Status:     progressStatus(e.Status),
+		StatusText: e.Text,
 	})
 }
 
-func (p *ProgressObserver) OnSpanUpdate(s *deploy.Span) {
-	p.writer.Event(progress.Event{
-		ID:         s.Display.ID,
-		ParentID:   s.Display.ParentID,
-		Status:     progressStatus(s.State),
-		StatusText: s.Display.Text,
-	})
-}
-
-func (p *ProgressObserver) OnSpanEnd(s *deploy.Span) {
-	p.writer.Event(progress.Event{
-		ID:         s.Display.ID,
-		ParentID:   s.Display.ParentID,
-		Status:     progressStatus(s.State),
-		StatusText: s.Display.EndText,
-	})
-}
-
-// progressStatus maps span state to progress event status.
-func progressStatus(state deploy.State) progress.EventStatus {
-	switch state {
-	case deploy.StateSuccess:
+func progressStatus(status deploy.EventStatus) progress.EventStatus {
+	switch status {
+	case deploy.StatusDone:
 		return progress.Done
-	case deploy.StateFailed:
+	case deploy.StatusError:
 		return progress.Error
 	default:
 		return progress.Working

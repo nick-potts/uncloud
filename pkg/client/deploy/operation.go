@@ -71,9 +71,19 @@ func (o *RunContainerOperation) SpanInfo(machineNames map[string]string) SpanInf
 		machine = stringid.TruncateID(o.MachineID)
 	}
 	return SpanInfo{
-		DisplayID:   fmt.Sprintf("Container on %s", machine),
+		ID:          fmt.Sprintf("Container on %s", machine),
 		RunningText: "Creating",
 		DoneText:    "Created",
+	}
+}
+
+// EventDetails returns structured data for the run container operation.
+func (o *RunContainerOperation) EventDetails(machineNames map[string]string) Details {
+	return ContainerDetails{
+		MachineID:   o.MachineID,
+		MachineName: machineNames[o.MachineID],
+		Image:       o.Spec.Container.Image,
+		Action:      ContainerActionCreate,
 	}
 }
 
@@ -109,9 +119,19 @@ func (o *StopContainerOperation) SpanInfo(machineNames map[string]string) SpanIn
 		machine = stringid.TruncateID(o.MachineID)
 	}
 	return SpanInfo{
-		DisplayID:   fmt.Sprintf("Container %s on %s", stringid.TruncateID(o.ContainerID), machine),
+		ID:          fmt.Sprintf("Container %s on %s", stringid.TruncateID(o.ContainerID), machine),
 		RunningText: "Stopping",
 		DoneText:    "Stopped",
+	}
+}
+
+// EventDetails returns structured data for the stop container operation.
+func (o *StopContainerOperation) EventDetails(machineNames map[string]string) Details {
+	return ContainerDetails{
+		MachineID:   o.MachineID,
+		MachineName: machineNames[o.MachineID],
+		ContainerID: o.ContainerID,
+		Action:      ContainerActionStop,
 	}
 }
 
@@ -153,9 +173,20 @@ func (o *RemoveContainerOperation) SpanInfo(machineNames map[string]string) Span
 		machine = stringid.TruncateID(o.MachineID)
 	}
 	return SpanInfo{
-		DisplayID:   fmt.Sprintf("Container %s on %s", o.Container.ShortID(), machine),
+		ID:          fmt.Sprintf("Container %s on %s", o.Container.ShortID(), machine),
 		RunningText: "Removing",
 		DoneText:    "Removed",
+	}
+}
+
+// EventDetails returns structured data for the remove container operation.
+func (o *RemoveContainerOperation) EventDetails(machineNames map[string]string) Details {
+	return ContainerDetails{
+		MachineID:   o.MachineID,
+		MachineName: machineNames[o.MachineID],
+		ContainerID: o.Container.ID,
+		Image:       o.Container.Config.Image,
+		Action:      ContainerActionRemove,
 	}
 }
 
@@ -209,10 +240,22 @@ func (o *CreateVolumeOperation) SpanInfo(machineNames map[string]string) SpanInf
 		machine = stringid.TruncateID(o.MachineID)
 	}
 	return SpanInfo{
-		DisplayID:   fmt.Sprintf("Volume %s on %s", o.VolumeSpec.DockerVolumeName(), machine),
-		IsTopLevel:  true, // Volumes appear at root level, not nested under services
+		ID:          fmt.Sprintf("Volume %s on %s", o.VolumeSpec.DockerVolumeName(), machine),
 		RunningText: "Creating",
 		DoneText:    "Created",
+	}
+}
+
+// EventDetails returns structured data for the create volume operation.
+func (o *CreateVolumeOperation) EventDetails(machineNames map[string]string) Details {
+	machineName := o.MachineName
+	if machineName == "" {
+		machineName = machineNames[o.MachineID]
+	}
+	return VolumeDetails{
+		MachineID:   o.MachineID,
+		MachineName: machineName,
+		VolumeName:  o.VolumeSpec.DockerVolumeName(),
 	}
 }
 

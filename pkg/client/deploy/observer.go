@@ -1,44 +1,25 @@
 package deploy
 
-// Observer receives span lifecycle events.
+// Observer receives deployment progress events.
 type Observer interface {
-	OnSpanStart(span *Span)
-	OnSpanUpdate(span *Span) // State/action change, counts update
-	OnSpanEnd(span *Span)
+	OnEvent(event Event)
 }
 
 // NoopObserver is an Observer that does nothing.
 type NoopObserver struct{}
 
-func (NoopObserver) OnSpanStart(*Span)  {}
-func (NoopObserver) OnSpanUpdate(*Span) {}
-func (NoopObserver) OnSpanEnd(*Span)    {}
+func (NoopObserver) OnEvent(Event) {}
 
 // MultiObserver broadcasts events to multiple observers.
 type MultiObserver []Observer
 
-func (m MultiObserver) OnSpanStart(s *Span) {
+func (m MultiObserver) OnEvent(e Event) {
 	for _, o := range m {
-		o.OnSpanStart(s)
-	}
-}
-
-func (m MultiObserver) OnSpanUpdate(s *Span) {
-	for _, o := range m {
-		o.OnSpanUpdate(s)
-	}
-}
-
-func (m MultiObserver) OnSpanEnd(s *Span) {
-	for _, o := range m {
-		o.OnSpanEnd(s)
+		o.OnEvent(e)
 	}
 }
 
 // ObserverFunc adapts a function to the Observer interface.
-// Useful for testing or simple logging.
-type ObserverFunc func(*Span)
+type ObserverFunc func(Event)
 
-func (f ObserverFunc) OnSpanStart(s *Span)  { f(s) }
-func (f ObserverFunc) OnSpanUpdate(s *Span) { f(s) }
-func (f ObserverFunc) OnSpanEnd(s *Span)    { f(s) }
+func (f ObserverFunc) OnEvent(e Event) { f(e) }

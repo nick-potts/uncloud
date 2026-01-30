@@ -2,122 +2,122 @@ package deploy
 
 import "time"
 
-// State represents the lifecycle state of a span.
-type State string
-
-const (
-	StatePending State = "pending" // Waiting to start
-	StateRunning State = "running" // In progress
-	StateSuccess State = "success" // Completed successfully
-	StateFailed  State = "failed"  // Failed with error
-)
-
-// Phase represents the deployment strategy phase.
-type Phase string
-
-const (
-	PhaseDeploying   Phase = "deploying"    // Creating new containers
-	PhaseCommitting  Phase = "committing"   // Removing old after new healthy
-	PhaseRollingBack Phase = "rolling_back" // Reverting to previous
-)
-
-// Counts aggregates state counts for progress display.
-type Counts struct {
-	Pending int
-	Running int
-	Success int
-	Failed  int
-}
-
-// Total returns the total number of spans.
-func (c *Counts) Total() int {
-	return c.Pending + c.Running + c.Success + c.Failed
-}
-
-// Complete returns the number of completed spans (success + failed).
-func (c *Counts) Complete() int {
-	return c.Success + c.Failed
-}
-
-// Span represents a unit of work in the deployment hierarchy.
-// Observers should use Display fields for rendering without interpreting other fields.
-type Span struct {
-	ID       string
-	ParentID string // Empty for root spans
-
-	Phase     Phase
-	State     State
-	StartTime time.Time
-	EndTime   time.Time
-	Error     error
-
-	// Counts aggregates descendant state counts (excludes self).
-	Counts Counts
-
-	// Progress tracks completion for operations like image pulls.
-	// Only set for spans that have measurable progress.
-	Progress *Progress
-
-	// Display holds pre-computed text for rendering.
-	// Observers should use these fields directly.
-	Display Display
-}
-
-// Display holds pre-computed display text for observers.
-// This allows observers to render spans without understanding span semantics.
-type Display struct {
+// Event represents a deployment progress event sent to observers.
+// Events contain both display-ready fields (for simple observers like CLI)
+// and structured data (for rich observers like web UI).
+type Event struct {
 	// ID is the human-readable identifier for progress display.
-	// Examples: "myservice", "Container abc123 on machine1", "Volume data on machine1"
+	// Examples: "myservice", "Container on machine1", "Volume data on machine1"
 	ID string
 
-	// ParentID is the parent's display ID (not span UUID).
-	// Empty for root-level spans in progress display.
+	// ParentID is the display ID of the parent event.
+	// Empty for root-level events.
 	ParentID string
 
-	// Text is the current status text (e.g., "Creating", "Pulling", "Waiting on db").
+	// Status describes the current state.
+	Status EventStatus
+
+	// Text is the status text (e.g., "Creating", "Deployed", error message).
 	Text string
 
-	// EndText is the status text to show when the span completes.
-	// For success: "Deployed", "Created", etc. For failure: error message.
-	EndText string
+	// Timestamp is when this event was emitted.
+	Timestamp time.Time
+
+	// Duration is how long the operation took. Only set when Status is Done or Error.
+	Duration time.Duration
+
+	// Details contains type-specific structured data for rich observers.
+	// Simple observers can ignore this field.
+	// Use type assertion to access specific details (e.g., ContainerDetails, VolumeDetails).
+	Details Details
 }
 
-// Progress tracks completion for operations with measurable progress.
+// EventStatus represents the lifecycle state of an operation.
+type EventStatus int
+
+const (
+	StatusRunning EventStatus = iota
+	StatusDone
+	StatusError
+)
+
+// Details is implemented by all event detail types.
+// Rich observers can type-assert to access specific fields.
+type Details interface {
+	// eventDetails is a marker method to identify detail types.
+	eventDetails()
+}
+
+// Progress represents completion progress for long-running operations.
 type Progress struct {
-	Current int64  // Current bytes or units completed
-	Total   int64  // Total bytes or units
-	Percent int    // Completion percentage (0-100)
-	Text    string // Status text (e.g., "Downloading", "Extracting")
+	// Current is the number of units completed.
+	Current int64
+	// Total is the total number of units. Zero if unknown.
+	Total int64
+	// Percent is the completion percentage (0-100). -1 if unknown.
+	Percent int
 }
 
-// IsRunning returns true if the span is currently running.
-func (s *Span) IsRunning() bool {
-	return s.State == StateRunning
+// ServiceDetails contains structured data for service-level events.
+type ServiceDetails struct {
+	ServiceID   string
+	ServiceName string
+	// Progress tracks operation completion (e.g., 3/5 containers deployed).
+	Progress *Progress
 }
 
-// IsComplete returns true if the span has finished (success or failed).
-func (s *Span) IsComplete() bool {
-	return s.State == StateSuccess || s.State == StateFailed
+func (ServiceDetails) eventDetails() {}
+
+// ContainerAction describes what operation is being performed on a container.
+type ContainerAction string
+
+const (
+	ContainerActionCreate ContainerAction = "create"
+	ContainerActionStart  ContainerAction = "start"
+	ContainerActionStop   ContainerAction = "stop"
+	ContainerActionRemove ContainerAction = "remove"
+)
+
+// ContainerDetails contains structured data for container operation events.
+type ContainerDetails struct {
+	MachineID   string
+	MachineName string
+	ContainerID string
+	Image       string
+	Action      ContainerAction
 }
 
-// Duration returns how long the span has been running or took to complete.
-func (s *Span) Duration() time.Duration {
-	if s.EndTime.IsZero() {
-		return time.Since(s.StartTime)
-	}
-	return s.EndTime.Sub(s.StartTime)
+func (ContainerDetails) eventDetails() {}
+
+// VolumeDetails contains structured data for volume operation events.
+type VolumeDetails struct {
+	MachineID   string
+	MachineName string
+	VolumeName  string
 }
+
+func (VolumeDetails) eventDetails() {}
+
+// ImagePullDetails contains structured data for image pull events.
+type ImagePullDetails struct {
+	MachineID   string
+	MachineName string
+	Image       string
+	// Progress tracks pull completion. Nil if not yet known.
+	Progress *Progress
+}
+
+func (ImagePullDetails) eventDetails() {}
 
 // SpanInfo provides display metadata for an operation.
-// Operations implement this to describe how they should appear in progress output.
+// Operations implement SpanInfoProvider to describe how they should appear in progress output.
 type SpanInfo struct {
-	// DisplayID is the human-readable identifier shown in progress output.
-	// Examples: "Container abc123 on machine1", "Volume data on machine1"
-	DisplayID string
+	// ID is the human-readable identifier shown in progress output.
+	// Examples: "Container on machine1", "Volume data on machine1"
+	ID string
 
-	// IsTopLevel indicates this span should appear at the root level in progress display,
-	// without visual nesting under a parent even if ParentID is set internally.
-	IsTopLevel bool
+	// ParentID is the parent's display ID. Empty for top-level items.
+	ParentID string
 
 	// RunningText is the status shown while the operation is in progress.
 	// Examples: "Creating", "Stopping", "Pulling"
@@ -129,9 +129,15 @@ type SpanInfo struct {
 }
 
 // SpanInfoProvider is implemented by operations that can provide display metadata.
-// This allows the executor to get display info without type-switching on operation types.
 type SpanInfoProvider interface {
 	// SpanInfo returns display metadata for this operation.
 	// machineNames maps machine IDs to display names for formatting.
 	SpanInfo(machineNames map[string]string) SpanInfo
+}
+
+// EventDetailsProvider is implemented by operations that can provide structured event data.
+type EventDetailsProvider interface {
+	// EventDetails returns structured data for this operation.
+	// machineNames maps machine IDs to display names.
+	EventDetails(machineNames map[string]string) Details
 }
