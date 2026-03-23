@@ -16,36 +16,15 @@ import (
 func (cli *Client) CreateVolume(
 	ctx context.Context, machineNameOrID string, opts volume.CreateOptions,
 ) (api.MachineVolume, error) {
-	var resp api.MachineVolume
-
 	if opts.Name == "" {
-		return resp, fmt.Errorf("volume name is required (anonymous volumes are not supported)")
+		return api.MachineVolume{}, fmt.Errorf("volume name is required (anonymous volumes are not supported)")
 	}
 
 	machine, err := cli.InspectMachine(ctx, machineNameOrID)
 	if err != nil {
-		return resp, fmt.Errorf("inspect machine '%s': %w", machineNameOrID, err)
+		return api.MachineVolume{}, fmt.Errorf("inspect machine '%s': %w", machineNameOrID, err)
 	}
-	// Proxy Docker gRPC requests to the selected machine.
-	ctx = proxyToMachine(ctx, machine.Machine)
-
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Volume %s on %s", opts.Name, machine.Machine.Name)
-	pw.Event(progress.CreatingEvent(eventID))
-
-	vol, err := cli.Docker.CreateVolume(ctx, opts)
-	if err != nil {
-		return resp, err
-	}
-
-	resp = api.MachineVolume{
-		MachineID:   machine.Machine.Id,
-		MachineName: machine.Machine.Name,
-		Volume:      vol,
-	}
-	pw.Event(progress.CreatedEvent(eventID))
-
-	return resp, nil
+	return cli.CreateVolumeOnMachine(ctx, machine.Machine, opts)
 }
 
 // ListVolumes returns a list of all volumes on the cluster machines that match the filter.
@@ -132,4 +111,32 @@ func (cli *Client) RemoveVolume(ctx context.Context, machineNameOrID, volumeName
 	pw.Event(progress.RemovedEvent(eventID))
 
 	return nil
+}
+
+func (cli *Client) CreateVolumeOnMachine(
+	ctx context.Context, machine *pb.MachineInfo, opts volume.CreateOptions,
+) (api.MachineVolume, error) {
+	if opts.Name == "" {
+		return api.MachineVolume{}, fmt.Errorf("volume name is required (anonymous volumes are not supported)")
+	}
+
+	ctx = proxyToMachine(ctx, machine)
+
+	pw := progress.ContextWriter(ctx)
+	eventID := fmt.Sprintf("Volume %s on %s", opts.Name, machine.Name)
+	pw.Event(progress.CreatingEvent(eventID))
+
+	vol, err := cli.Docker.CreateVolume(ctx, opts)
+	if err != nil {
+		return api.MachineVolume{}, err
+	}
+
+	resp := api.MachineVolume{
+		MachineID:   machine.Id,
+		MachineName: machine.Name,
+		Volume:      vol,
+	}
+	pw.Event(progress.CreatedEvent(eventID))
+
+	return resp, nil
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/psviderski/uncloud/internal/cli/tui"
+	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	"github.com/psviderski/uncloud/pkg/api"
 )
 
@@ -17,6 +18,7 @@ type RunContainerOperation struct {
 	ServiceID string
 	Spec      api.ServiceSpec
 	MachineID string
+	Machine   *pb.MachineInfo
 	// MachineName is used for formatting the operation as part of the deployment plan.
 	MachineName string
 	// SkipHealthMonitor skips the monitoring period and health checks after starting a container.
@@ -24,11 +26,11 @@ type RunContainerOperation struct {
 }
 
 func (o *RunContainerOperation) Execute(ctx context.Context, cli Client) error {
-	resp, err := cli.CreateContainer(ctx, o.ServiceID, o.Spec, o.MachineID)
+	resp, containerName, err := cli.CreateContainerOnMachine(ctx, o.ServiceID, o.Spec, o.Machine)
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
-	if err = cli.StartContainer(ctx, o.ServiceID, resp.ID); err != nil {
+	if err = cli.StartContainerOnMachine(ctx, o.Machine, resp.ID, containerName); err != nil {
 		return fmt.Errorf("start container: %w", err)
 	}
 
@@ -37,7 +39,7 @@ func (o *RunContainerOperation) Execute(ctx context.Context, cli Client) error {
 	}
 
 	opts := api.WaitContainerHealthyOptions{MonitorPeriod: o.Spec.UpdateConfig.MonitorPeriod}
-	if err = cli.WaitContainerHealthy(ctx, o.ServiceID, resp.ID, opts); err != nil {
+	if err = cli.WaitContainerHealthyOnMachine(ctx, o.Machine, resp.ID, containerName, opts); err != nil {
 		return fmt.Errorf("container '%s/%s' failed to become healthy: %w",
 			o.Spec.Name, stringid.TruncateID(resp.ID), err)
 	}
@@ -63,13 +65,14 @@ type StopContainerOperation struct {
 	ServiceID   string
 	ContainerID string
 	MachineID   string
+	Machine     *pb.MachineInfo
 	// MachineName is used for formatting the operation as part of the deployment plan.
 	MachineName     string
 	StopGracePeriod *time.Duration
 }
 
 func (o *StopContainerOperation) Execute(ctx context.Context, cli Client) error {
-	if err := cli.StopContainer(ctx, o.ServiceID, o.ContainerID, stopOptions(o.StopGracePeriod)); err != nil {
+	if err := cli.StopContainerOnMachine(ctx, o.Machine, o.ContainerID, o.ContainerID, stopOptions(o.StopGracePeriod)); err != nil {
 		return fmt.Errorf("stop container: %w", err)
 	}
 	return nil
@@ -94,6 +97,7 @@ func (o *StopContainerOperation) String() string {
 // RemoveContainerOperation stops and removes a container from a specific machine.
 type RemoveContainerOperation struct {
 	MachineID string
+	Machine   *pb.MachineInfo
 	// MachineName is used for formatting the operation as part of the deployment plan.
 	MachineName     string
 	Container       api.ServiceContainer
@@ -101,12 +105,12 @@ type RemoveContainerOperation struct {
 }
 
 func (o *RemoveContainerOperation) Execute(ctx context.Context, cli Client) error {
-	err := cli.StopContainer(ctx, o.Container.ServiceID(), o.Container.ID, stopOptions(o.StopGracePeriod))
+	err := cli.StopContainerOnMachine(ctx, o.Machine, o.Container.ID, o.Container.Name, stopOptions(o.StopGracePeriod))
 	if err != nil {
 		return fmt.Errorf("stop container: %w", err)
 	}
 
-	if err = cli.RemoveContainer(ctx, o.Container.ServiceID(), o.Container.ID, container.RemoveOptions{
+	if err = cli.RemoveContainerOnMachine(ctx, o.Machine, o.Container.ID, o.Container.Name, container.RemoveOptions{
 		// Remove anonymous volumes created by the container.
 		RemoveVolumes: true,
 	}); err != nil {
@@ -138,6 +142,7 @@ type ReplaceContainerOperation struct {
 	ServiceID string
 	Spec      api.ServiceSpec
 	MachineID string
+	Machine   *pb.MachineInfo
 	// MachineName is used for formatting the operation as part of the deployment plan.
 	MachineName  string
 	OldContainer api.ServiceContainer
@@ -151,40 +156,34 @@ type ReplaceContainerOperation struct {
 func (o *ReplaceContainerOperation) Execute(ctx context.Context, cli Client) error {
 	stopFirst := o.Order == api.UpdateOrderStopFirst
 
-	wasRunning := false
+	wasRunning := o.OldContainer.State.Running
 	if stopFirst {
-		// Inspect the old container to remember its running state before stopping.
-		ctr, err := cli.InspectContainer(ctx, o.ServiceID, o.OldContainer.ID)
-		if err != nil {
-			return fmt.Errorf("inspect old container: %w", err)
-		}
-		wasRunning = ctr.Container.State.Running
 		if wasRunning {
-			err = cli.StopContainer(ctx, o.ServiceID, o.OldContainer.ID, stopOptions(o.StopGracePeriod))
+			err := cli.StopContainerOnMachine(ctx, o.Machine, o.OldContainer.ID, o.OldContainer.Name, stopOptions(o.StopGracePeriod))
 			if err != nil {
 				return fmt.Errorf("stop old container: %w", err)
 			}
 		}
 	}
 
-	resp, err := cli.CreateContainer(ctx, o.ServiceID, o.Spec, o.MachineID)
+	resp, containerName, err := cli.CreateContainerOnMachine(ctx, o.ServiceID, o.Spec, o.Machine)
 	if err != nil {
 		return fmt.Errorf("create new container: %w", err)
 	}
-	if err = cli.StartContainer(ctx, o.ServiceID, resp.ID); err != nil {
+	if err = cli.StartContainerOnMachine(ctx, o.Machine, resp.ID, containerName); err != nil {
 		return fmt.Errorf("start new container: %w", err)
 	}
 
 	if !o.SkipHealthMonitor {
 		opts := api.WaitContainerHealthyOptions{MonitorPeriod: o.Spec.UpdateConfig.MonitorPeriod}
-		if err = cli.WaitContainerHealthy(ctx, o.ServiceID, resp.ID, opts); err != nil {
+		if err = cli.WaitContainerHealthyOnMachine(ctx, o.Machine, resp.ID, containerName, opts); err != nil {
 			// New container failed to become healthy. Stop it and roll back to the previous container.
 			// Don't remove the new stopped container to allow users to inspect logs and state.
 			// TODO: collect logs from the new container and include in the error message to speed up debugging.
 
 			// Use context without progress to not overwrite the container Unhealthy status with Stopped.
 			ctxWithoutProgress := progress.WithContextWriter(ctx, nil)
-			_ = cli.StopContainer(ctxWithoutProgress, o.ServiceID, resp.ID, stopOptions(o.StopGracePeriod))
+			_ = cli.StopContainerOnMachine(ctxWithoutProgress, o.Machine, resp.ID, containerName, stopOptions(o.StopGracePeriod))
 
 			newCtr := fmt.Sprintf("%s/%s", o.Spec.Name, stringid.TruncateID(resp.ID))
 			healthErr := fmt.Errorf(
@@ -196,7 +195,7 @@ func (o *ReplaceContainerOperation) Execute(ctx context.Context, cli Client) err
 			if stopFirst && wasRunning {
 				// Restart the old container only if it was running before we stopped it.
 				oldCtr := fmt.Sprintf("%s/%s", o.OldContainer.ServiceSpec.Name, o.OldContainer.ShortID())
-				if rollbackErr := cli.StartContainer(ctx, o.ServiceID, o.OldContainer.ID); rollbackErr != nil {
+				if rollbackErr := cli.StartContainerOnMachine(ctx, o.Machine, o.OldContainer.ID, o.OldContainer.Name); rollbackErr != nil {
 					return fmt.Errorf("%w. Rolled back to old container '%s' but failed to restart it: %w",
 						healthErr, oldCtr, rollbackErr)
 				}
@@ -214,12 +213,12 @@ func (o *ReplaceContainerOperation) Execute(ctx context.Context, cli Client) err
 		//  There still might be a brief downtime (for a 1 replica service) when Caddy doesn't know about
 		//  the new container but we're stopping the old container. We should somehow ensure Caddy is updated
 		//  with the new container before we stop the old one to avoid this downtime.
-		if err = cli.StopContainer(ctx, o.ServiceID, o.OldContainer.ID, stopOptions(o.StopGracePeriod)); err != nil {
+		if err = cli.StopContainerOnMachine(ctx, o.Machine, o.OldContainer.ID, o.OldContainer.Name, stopOptions(o.StopGracePeriod)); err != nil {
 			return fmt.Errorf("stop old container: %w", err)
 		}
 	}
 
-	if err = cli.RemoveContainer(ctx, o.ServiceID, o.OldContainer.ID, container.RemoveOptions{
+	if err = cli.RemoveContainerOnMachine(ctx, o.Machine, o.OldContainer.ID, o.OldContainer.Name, container.RemoveOptions{
 		RemoveVolumes: true,
 	}); err != nil {
 		return fmt.Errorf("remove old container: %w", err)

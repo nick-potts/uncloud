@@ -6,6 +6,7 @@ import (
 
 	"github.com/docker/docker/api/types/volume"
 	"github.com/psviderski/uncloud/internal/cli/tui"
+	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	"github.com/psviderski/uncloud/pkg/api"
 )
 
@@ -13,6 +14,7 @@ import (
 type CreateVolumeOperation struct {
 	VolumeSpec api.VolumeSpec
 	MachineID  string
+	Machine    *pb.MachineInfo
 	// MachineName is used for formatting the operation as part of the deployment plan.
 	MachineName string
 }
@@ -33,7 +35,7 @@ func (o *CreateVolumeOperation) Execute(ctx context.Context, cli Client) error {
 		opts.Labels = o.VolumeSpec.VolumeOptions.Labels
 	}
 
-	if _, err := cli.CreateVolume(ctx, o.MachineID, opts); err != nil {
+	if _, err := cli.CreateVolumeOnMachine(ctx, o.Machine, opts); err != nil {
 		return fmt.Errorf("create volume: %w", err)
 	}
 

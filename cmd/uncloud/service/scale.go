@@ -92,6 +92,7 @@ func scale(ctx context.Context, uncli *cli.CLI, opts scaleOptions) error {
 	spec := svc.Containers[0].Container.ServiceSpec
 	spec.Replicas = opts.replicas
 	deployment := clusterClient.NewDeployment(spec, nil)
+	deployment.UseResolvedState(&svc, nil)
 	plan, err := deployment.Plan(ctx)
 	if err != nil {
 		return fmt.Errorf("plan deployment: %w", err)

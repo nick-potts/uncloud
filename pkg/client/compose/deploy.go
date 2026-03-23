@@ -23,12 +23,14 @@ type Client interface {
 }
 
 type Deployment struct {
-	Client       Client
-	Project      *types.Project
-	SpecResolver *deploy.ServiceSpecResolver
-	Strategy     deploy.Strategy
-	state        *scheduler.ClusterState
-	plan         *Plan
+	Client           Client
+	Project          *types.Project
+	SpecResolver     *deploy.ServiceSpecResolver
+	Strategy         deploy.Strategy
+	state            *scheduler.ClusterState
+	plan             *Plan
+	serviceByID      map[string]api.Service
+	serviceIDsByName map[string][]string
 }
 
 func NewDeployment(ctx context.Context, cli Client, project *types.Project) (*Deployment, error) {
@@ -41,6 +43,17 @@ func NewDeploymentWithStrategy(ctx context.Context, cli Client, project *types.P
 		return nil, fmt.Errorf("inspect cluster state: %w", err)
 	}
 
+	services, err := cli.ListServices(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+	serviceIDsByName := make(map[string][]string, len(services))
+	serviceByID := make(map[string]api.Service, len(services))
+	for _, svc := range services {
+		serviceByID[svc.ID] = svc
+		serviceIDsByName[svc.Name] = append(serviceIDsByName[svc.Name], svc.ID)
+	}
+
 	domain, err := cli.GetDomain(ctx)
 	if err != nil && !errors.Is(err, api.ErrNotFound) {
 		return nil, fmt.Errorf("get cluster domain: %w", err)
@@ -51,11 +64,13 @@ func NewDeploymentWithStrategy(ctx context.Context, cli Client, project *types.P
 	}
 
 	return &Deployment{
-		Client:       cli,
-		Project:      project,
-		SpecResolver: resolver,
-		Strategy:     strategy,
-		state:        state,
+		Client:           cli,
+		Project:          project,
+		SpecResolver:     resolver,
+		Strategy:         strategy,
+		state:            state,
+		serviceByID:      serviceByID,
+		serviceIDsByName: serviceIDsByName,
 	}, nil
 }
 
@@ -96,6 +111,16 @@ func (d *Deployment) Plan(ctx context.Context) (Plan, error) {
 		// TODO: properly handle depends_on conditions in the service deployment plan as the first operation.
 		// Pass the updated cluster state with the scheduled volumes to the deployment.
 		deployment := deploy.NewDeploymentWithClusterState(d.Client, spec, d.Strategy, d.state)
+		switch ids := d.serviceIDsByName[spec.Name]; len(ids) {
+		case 0:
+			deployment.UseResolvedState(nil, &d.SpecResolver.ClusterDomain)
+		case 1:
+			svc := d.serviceByID[ids[0]]
+			deployment.UseResolvedState(&svc, &d.SpecResolver.ClusterDomain)
+		default:
+			return plan, fmt.Errorf("create deployment plan for service '%s': multiple services found with name '%s', use the service ID instead",
+				spec.Name, spec.Name)
+		}
 		servicePlan, err := deployment.Plan(ctx)
 		if err != nil {
 			return plan, fmt.Errorf("create deployment plan for service '%s': %w", spec.Name, err)
@@ -150,6 +175,13 @@ func (d *Deployment) planVolumes(serviceSpecs []api.ServiceSpec) ([]*operation.C
 			machineName := machineID
 			if m, ok := d.state.Machine(machineID); ok {
 				machineName = m.Info.Name
+				ops = append(ops, &operation.CreateVolumeOperation{
+					MachineID:   machineID,
+					Machine:     m.Info,
+					MachineName: machineName,
+					VolumeSpec:  v,
+				})
+				continue
 			}
 
 			ops = append(ops, &operation.CreateVolumeOperation{

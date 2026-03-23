@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/psviderski/uncloud/internal/docker"
+	"github.com/psviderski/uncloud/internal/machine/api/pb"
 	machinedocker "github.com/psviderski/uncloud/internal/machine/docker"
 	"github.com/psviderski/uncloud/internal/secret"
 	"github.com/psviderski/uncloud/pkg/api"
@@ -25,35 +26,42 @@ import (
 func (cli *Client) CreateContainer(
 	ctx context.Context, serviceID string, spec api.ServiceSpec, machineID string,
 ) (container.CreateResponse, error) {
+	machine, err := cli.InspectMachine(ctx, machineID)
+	if err != nil {
+		return container.CreateResponse{}, fmt.Errorf("inspect machine '%s': %w", machineID, err)
+	}
+
+	resp, _, err := cli.CreateContainerOnMachine(ctx, serviceID, spec, machine.Machine)
+	return resp, err
+}
+
+func (cli *Client) CreateContainerOnMachine(
+	ctx context.Context, serviceID string, spec api.ServiceSpec, machine *pb.MachineInfo,
+) (container.CreateResponse, string, error) {
 	var resp container.CreateResponse
 
 	spec = spec.SetDefaults()
 	if err := spec.Validate(); err != nil {
-		return resp, fmt.Errorf("invalid service spec: %w", err)
+		return resp, "", fmt.Errorf("invalid service spec: %w", err)
 	}
 	// TODO: validate spec.Name is consistent with serviceID if this is not the first container in the service.
 
-	machine, err := cli.InspectMachine(ctx, machineID)
-	if err != nil {
-		return resp, fmt.Errorf("inspect machine '%s': %w", machineID, err)
-	}
-
 	suffix, err := secret.RandomAlphaNumeric(4)
 	if err != nil {
-		return resp, fmt.Errorf("generate random suffix: %w", err)
+		return resp, "", fmt.Errorf("generate random suffix: %w", err)
 	}
 	containerName := fmt.Sprintf("%s-%s", spec.Name, suffix)
 
 	// Proxy Docker gRPC requests to the selected machine.
-	ctx = proxyToMachine(ctx, machine.Machine)
+	ctx = proxyToMachine(ctx, machine)
 
 	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", containerName, machine.Machine.Name)
+	eventID := fmt.Sprintf("Container %s on %s", containerName, machine.Name)
 	pw.Event(progress.CreatingEvent(eventID))
 
 	if spec.Container.PullPolicy == api.PullPolicyAlways {
-		if err = cli.pullImageWithProgress(ctx, spec.Container.Image, machine.Machine.Name, eventID); err != nil {
-			return resp, err
+		if err = cli.pullImageWithProgress(ctx, spec.Container.Image, machine.Name, eventID); err != nil {
+			return resp, "", err
 		}
 	}
 
@@ -61,28 +69,28 @@ func (cli *Client) CreateContainer(
 	if err != nil {
 		switch spec.Container.PullPolicy {
 		case api.PullPolicyAlways, api.PullPolicyNever:
-			return resp, err
+			return resp, "", err
 		case api.PullPolicyMissing:
 		default:
-			return resp, fmt.Errorf("unsupported pull policy: '%s'", spec.Container.PullPolicy)
+			return resp, "", fmt.Errorf("unsupported pull policy: '%s'", spec.Container.PullPolicy)
 		}
 
 		// NotFound (No such image) error is expected if the image is missing.
 		if !errdefs.IsNotFound(err) || !strings.Contains(err.Error(), "No such image") {
-			return resp, err
+			return resp, "", err
 		}
 
 		// Pull the missing image and create the container again.
-		if err = cli.pullImageWithProgress(ctx, spec.Container.Image, machine.Machine.Name, eventID); err != nil {
-			return resp, err
+		if err = cli.pullImageWithProgress(ctx, spec.Container.Image, machine.Name, eventID); err != nil {
+			return resp, "", err
 		}
 		if resp, err = cli.Docker.CreateServiceContainer(ctx, serviceID, spec, containerName); err != nil {
-			return resp, err
+			return resp, "", err
 		}
 	}
 	pw.Event(progress.CreatedEvent(eventID))
 
-	return resp, nil
+	return resp, containerName, nil
 }
 
 func (cli *Client) pullImageWithProgress(ctx context.Context, image, machineName, parentEventID string) error {
@@ -245,18 +253,7 @@ func (cli *Client) StartContainer(ctx context.Context, serviceNameOrID, containe
 	if err != nil {
 		return fmt.Errorf("inspect machine '%s': %w", ctr.MachineID, err)
 	}
-	ctx = proxyToMachine(ctx, machine.Machine)
-
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", ctr.Container.Name, machine.Machine.Name)
-
-	pw.Event(progress.StartingEvent(eventID))
-	if err = cli.Docker.StartContainer(ctx, ctr.Container.ID, container.StartOptions{}); err != nil {
-		return err
-	}
-	pw.Event(progress.StartedEvent(eventID))
-
-	return nil
+	return cli.StartContainerOnMachine(ctx, machine.Machine, ctr.Container.ID, ctr.Container.Name)
 }
 
 // StopContainer stops the specified container within the service.
@@ -272,18 +269,7 @@ func (cli *Client) StopContainer(
 	if err != nil {
 		return fmt.Errorf("inspect machine '%s': %w", ctr.MachineID, err)
 	}
-	ctx = proxyToMachine(ctx, machine.Machine)
-
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", ctr.Container.Name, machine.Machine.Name)
-
-	pw.Event(progress.StoppingEvent(eventID))
-	if err = cli.Docker.StopContainer(ctx, ctr.Container.ID, opts); err != nil {
-		return err
-	}
-	pw.Event(progress.StoppedEvent(eventID))
-
-	return nil
+	return cli.StopContainerOnMachine(ctx, machine.Machine, ctr.Container.ID, ctr.Container.Name, opts)
 }
 
 // RemoveContainer removes the specified container within the service.
@@ -299,18 +285,7 @@ func (cli *Client) RemoveContainer(
 	if err != nil {
 		return fmt.Errorf("inspect machine '%s': %w", ctr.MachineID, err)
 	}
-	ctx = proxyToMachine(ctx, machine.Machine)
-
-	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", ctr.Container.Name, machine.Machine.Name)
-
-	pw.Event(progress.RemovingEvent(eventID))
-	if err = cli.Docker.RemoveServiceContainer(ctx, ctr.Container.ID, opts); err != nil {
-		return err
-	}
-	pw.Event(progress.RemovedEvent(eventID))
-
-	return nil
+	return cli.RemoveContainerOnMachine(ctx, machine.Machine, ctr.Container.ID, ctr.Container.Name, opts)
 }
 
 // ExecContainer executes a command in a container within the service.
@@ -381,8 +356,71 @@ func (cli *Client) WaitContainerHealthy(
 		return fmt.Errorf("inspect machine '%s': %w", mc.MachineID, err)
 	}
 
+	return cli.WaitContainerHealthyOnMachine(ctx, machine.Machine, mc.Container.ID, mc.Container.Name, opts)
+}
+
+func (cli *Client) StartContainerOnMachine(
+	ctx context.Context, machine *pb.MachineInfo, containerID, containerName string,
+) error {
+	ctx = proxyToMachine(ctx, machine)
+
 	pw := progress.ContextWriter(ctx)
-	eventID := fmt.Sprintf("Container %s on %s", mc.Container.Name, machine.Machine.Name)
+	eventID := fmt.Sprintf("Container %s on %s", containerName, machine.Name)
+
+	pw.Event(progress.StartingEvent(eventID))
+	if err := cli.Docker.StartContainer(ctx, containerID, container.StartOptions{}); err != nil {
+		return err
+	}
+	pw.Event(progress.StartedEvent(eventID))
+
+	return nil
+}
+
+func (cli *Client) StopContainerOnMachine(
+	ctx context.Context, machine *pb.MachineInfo, containerID, containerName string, opts container.StopOptions,
+) error {
+	ctx = proxyToMachine(ctx, machine)
+
+	pw := progress.ContextWriter(ctx)
+	eventID := fmt.Sprintf("Container %s on %s", containerName, machine.Name)
+
+	pw.Event(progress.StoppingEvent(eventID))
+	if err := cli.Docker.StopContainer(ctx, containerID, opts); err != nil {
+		return err
+	}
+	pw.Event(progress.StoppedEvent(eventID))
+
+	return nil
+}
+
+func (cli *Client) RemoveContainerOnMachine(
+	ctx context.Context, machine *pb.MachineInfo, containerID, containerName string, opts container.RemoveOptions,
+) error {
+	ctx = proxyToMachine(ctx, machine)
+
+	pw := progress.ContextWriter(ctx)
+	eventID := fmt.Sprintf("Container %s on %s", containerName, machine.Name)
+
+	pw.Event(progress.RemovingEvent(eventID))
+	if err := cli.Docker.RemoveServiceContainer(ctx, containerID, opts); err != nil {
+		return err
+	}
+	pw.Event(progress.RemovedEvent(eventID))
+
+	return nil
+}
+
+func (cli *Client) WaitContainerHealthyOnMachine(
+	ctx context.Context, machine *pb.MachineInfo, containerID, containerName string, opts api.WaitContainerHealthyOptions,
+) error {
+	ctx = proxyToMachine(ctx, machine)
+	mc, err := cli.Docker.InspectServiceContainer(ctx, containerID)
+	if err != nil {
+		return fmt.Errorf("inspect container: %w", err)
+	}
+
+	pw := progress.ContextWriter(ctx)
+	eventID := fmt.Sprintf("Container %s on %s", containerName, machine.Name)
 
 	var monitor time.Duration
 	if opts.MonitorPeriod == nil {
@@ -394,36 +432,35 @@ func (cli *Client) WaitContainerHealthy(
 
 	// For containers without a health check, just wait for the monitor period and then check the container
 	// is still running and not restarting.
-	if !mc.Container.HasHealthcheck() {
+	if !mc.HasHealthcheck() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(monitor):
 		}
 
-		mc, err := cli.InspectContainer(ctx, serviceNameOrID, containerNameOrID)
+		mc, err = cli.Docker.InspectServiceContainer(ctx, containerID)
 		if err != nil {
 			return fmt.Errorf("inspect container: %w", err)
 		}
 
-		if mc.Container.Healthy() {
+		if mc.Healthy() {
 			pw.Event(progress.RunningEvent(eventID))
 			return nil
 		}
 
-		humanState, _ := mc.Container.HumanState()
+		humanState, _ := mc.HumanState()
 		pw.Event(progress.ErrorMessageEvent(eventID, fmt.Sprintf("Unhealthy (%s)", humanState)))
 
-		if mc.Container.State.Restarting {
+		if mc.State.Restarting {
 			return fmt.Errorf("container is restarting after monitor period (%s): exit_code=%d",
-				monitor, mc.Container.State.ExitCode)
+				monitor, mc.State.ExitCode)
 		}
 		return fmt.Errorf("container is unhealthy after monitor period (%s): %s", monitor, humanState)
 	}
 
 	// For containers with a health check, wait until Docker reports healthy or unhealthy.
-	mctx := proxyToMachine(ctx, machine.Machine)
-	mctx, cancel := context.WithTimeout(mctx, healthcheckTimeout(mc.Container.Config.Healthcheck))
+	mctx, cancel := context.WithTimeout(ctx, healthcheckTimeout(mc.Config.Healthcheck))
 	defer cancel()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -434,7 +471,7 @@ func (cli *Client) WaitContainerHealthy(
 		case <-mctx.Done():
 			return mctx.Err()
 		case <-ticker.C:
-			ctr, err := cli.Docker.InspectServiceContainer(mctx, mc.Container.ID)
+			ctr, err := cli.Docker.InspectServiceContainer(mctx, containerID)
 			if err != nil {
 				pw.Event(progress.NewEvent(eventID, progress.Working,
 					fmt.Sprintf("Health checking (failed to inspect container: %v)", err)))

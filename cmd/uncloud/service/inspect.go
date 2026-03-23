@@ -42,18 +42,13 @@ func inspect(ctx context.Context, uncli *cli.CLI, opts inspectOptions) error {
 	}
 	defer client.Close()
 
-	svc, err := client.InspectService(ctx, opts.service)
+	snapshot, err := client.InspectClusterSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect cluster snapshot: %w", err)
+	}
+	svc, err := snapshot.Service(opts.service)
 	if err != nil {
 		return fmt.Errorf("inspect service: %w", err)
-	}
-
-	machines, err := client.ListMachines(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("list machines: %w", err)
-	}
-	machinesNamesByID := make(map[string]string)
-	for _, m := range machines {
-		machinesNamesByID[m.Machine.Id] = m.Machine.Name
 	}
 
 	fmt.Printf("Service ID: %s\n", svc.ID)
@@ -82,10 +77,7 @@ func inspect(ctx context.Context, uncli *cli.CLI, opts inspectOptions) error {
 	for _, ctr := range svc.Containers {
 		created := units.HumanDuration(now.Sub(createdTimes[ctr.Container.ID])) + " ago"
 
-		machine := machinesNamesByID[ctr.MachineID]
-		if machine == "" {
-			machine = ctr.MachineID
-		}
+		machine := snapshot.MachineName(ctr.MachineID)
 		state, err := ctr.Container.HumanState()
 		if err != nil {
 			return fmt.Errorf("get human state: %w", err)

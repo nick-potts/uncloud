@@ -428,8 +428,10 @@ func TestReconcileGlobalContainer(t *testing.T) {
 func assertOperationsEqual(t *testing.T, expected, actual []operation.Operation) {
 	t.Helper()
 	opts := cmp.Options{
-		cmpopts.IgnoreFields(operation.RunContainerOperation{}, "Spec"),
-		cmpopts.IgnoreFields(operation.ReplaceContainerOperation{}, "Spec"),
+		cmpopts.IgnoreFields(operation.RunContainerOperation{}, "Spec", "Machine"),
+		cmpopts.IgnoreFields(operation.ReplaceContainerOperation{}, "Spec", "Machine"),
+		cmpopts.IgnoreFields(operation.StopContainerOperation{}, "Machine"),
+		cmpopts.IgnoreFields(operation.RemoveContainerOperation{}, "Machine"),
 		cmpopts.IgnoreUnexported(api.Container{}),
 	}
 	if diff := cmp.Diff(expected, actual, opts); diff != "" {

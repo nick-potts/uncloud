@@ -134,6 +134,11 @@ func runLogs(ctx context.Context, uncli *cli.CLI, serviceNames []string, opts lo
 	}
 	defer c.Close()
 
+	snapshot, err := c.InspectClusterSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect cluster snapshot: %w", err)
+	}
+
 	logsOpts := api.ServiceLogsOptions{
 		Follow:   opts.follow,
 		Tail:     tail,
@@ -149,7 +154,7 @@ func runLogs(ctx context.Context, uncli *cli.CLI, serviceNames []string, opts lo
 	var foundServices, notFoundServices []string
 
 	for _, serviceName := range serviceNames {
-		svc, ch, err := c.ServiceLogs(ctx, serviceName, logsOpts)
+		svc, ch, err := c.ServiceLogsFromSnapshot(ctx, snapshot, serviceName, logsOpts)
 		if err != nil {
 			if errors.Is(err, api.ErrNotFound) && fromCompose {
 				notFoundServices = append(notFoundServices, serviceName)
@@ -186,13 +191,9 @@ func runLogs(ctx context.Context, uncli *cli.CLI, serviceNames []string, opts lo
 	}
 
 	// Fetch machine names for all machines (machineIDsSet) service containers are running on.
-	machines, err := c.ListMachines(ctx, &api.MachineFilter{NamesOrIDs: machineIDsSet.ToSlice()})
-	if err != nil {
-		return fmt.Errorf("list machines: %w", err)
-	}
-	machineNames := make([]string, 0, len(machines))
-	for _, m := range machines {
-		machineNames = append(machineNames, m.Machine.Name)
+	machineNames := make([]string, 0, machineIDsSet.Cardinality())
+	for _, machineID := range machineIDsSet.ToSlice() {
+		machineNames = append(machineNames, snapshot.MachineName(machineID))
 	}
 
 	formatter := newLogFormatter(machineNames, serviceNames, opts.utc)

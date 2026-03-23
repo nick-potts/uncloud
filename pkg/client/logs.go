@@ -19,7 +19,19 @@ import (
 func (cli *Client) ServiceLogs(
 	ctx context.Context, serviceNameOrID string, opts api.ServiceLogsOptions,
 ) (api.Service, <-chan api.ServiceLogEntry, error) {
-	svc, err := cli.InspectService(ctx, serviceNameOrID)
+	snapshot, err := cli.InspectClusterSnapshot(ctx)
+	if err != nil {
+		return api.Service{}, nil, fmt.Errorf("inspect cluster snapshot: %w", err)
+	}
+	printSnapshotWarnings(snapshot.Warnings)
+
+	return cli.ServiceLogsFromSnapshot(ctx, snapshot, serviceNameOrID, opts)
+}
+
+func (cli *Client) ServiceLogsFromSnapshot(
+	ctx context.Context, snapshot *ClusterSnapshot, serviceNameOrID string, opts api.ServiceLogsOptions,
+) (api.Service, <-chan api.ServiceLogEntry, error) {
+	svc, err := snapshot.Service(serviceNameOrID)
 	if err != nil {
 		return svc, nil, fmt.Errorf("inspect service: %w", err)
 	}
@@ -28,9 +40,7 @@ func (cli *Client) ServiceLogs(
 		return svc, nil, fmt.Errorf("no containers found for service: %s", serviceNameOrID)
 	}
 
-	machines, err := cli.ListMachines(ctx, &api.MachineFilter{
-		NamesOrIDs: opts.Machines,
-	})
+	machines, err := snapshot.FilterMachines(opts.Machines)
 	if err != nil {
 		return svc, nil, fmt.Errorf("list machines: %w", err)
 	}
@@ -42,14 +52,17 @@ func (cli *Client) ServiceLogs(
 		if len(opts.Machines) > 0 && m == nil {
 			continue
 		}
-
-		// Machine name for ServiceLogEntry metadata and friendlier error message.
-		machineName := ctr.MachineID
-		if m != nil {
-			machineName = m.Machine.Name
+		if m == nil {
+			m, err = snapshot.Machine(ctr.MachineID)
+			if err != nil {
+				return svc, nil, fmt.Errorf("resolve machine '%s': %w", ctr.MachineID, err)
+			}
 		}
 
-		stream, err := cli.ContainerLogs(ctx, ctr.MachineID, ctr.Container.ID, opts)
+		// Machine name for ServiceLogEntry metadata and friendlier error message.
+		machineName := m.Machine.Name
+
+		stream, err := cli.ContainerLogsOnMachine(ctx, m.Machine, ctr.Container.ID, opts)
 		if err != nil {
 			return svc, nil, fmt.Errorf("stream logs from service container '%s' on machine '%s': %w",
 				stringid.TruncateID(ctr.Container.ID), machineName, err)
@@ -82,11 +95,27 @@ func (cli *Client) ServiceLogs(
 func (cli *Client) ContainerLogs(
 	ctx context.Context, machineNameOrID string, containerID string, opts api.ServiceLogsOptions,
 ) (<-chan api.ContainerLogEntry, error) {
-	proxyCtx, _, err := cli.ProxyMachinesContext(ctx, []string{machineNameOrID})
+	machine, err := cli.InspectMachine(ctx, machineNameOrID)
 	if err != nil {
-		return nil, fmt.Errorf("create request context to proxy to machine '%s': %w", machineNameOrID, err)
+		return nil, fmt.Errorf("inspect machine '%s': %w", machineNameOrID, err)
 	}
 
+	return cli.ContainerLogsOnMachine(ctx, machine.Machine, containerID, opts)
+}
+
+func (cli *Client) ContainerLogsOnMachine(
+	ctx context.Context, machine *pb.MachineInfo, containerID string, opts api.ServiceLogsOptions,
+) (<-chan api.ContainerLogEntry, error) {
+	proxyCtx := proxyToMachine(ctx, machine)
+	stream, err := cli.Docker.GRPCClient.ContainerLogs(proxyCtx, containerLogsRequest(containerID, opts))
+	if err != nil {
+		return nil, err
+	}
+
+	return containerLogsStream(ctx, stream), nil
+}
+
+func containerLogsRequest(containerID string, opts api.ServiceLogsOptions) *pb.ContainerLogsRequest {
 	req := &pb.ContainerLogsRequest{
 		ContainerId: containerID,
 		Follow:      opts.Follow,
@@ -100,11 +129,12 @@ func (cli *Client) ContainerLogs(
 		req.Tail = -1
 	}
 
-	stream, err := cli.Docker.GRPCClient.ContainerLogs(proxyCtx, req)
-	if err != nil {
-		return nil, err
-	}
+	return req
+}
 
+func containerLogsStream(
+	ctx context.Context, stream pb.Docker_ContainerLogsClient,
+) <-chan api.ContainerLogEntry {
 	ch := make(chan api.ContainerLogEntry)
 
 	go func() {
@@ -136,7 +166,7 @@ func (cli *Client) ContainerLogs(
 		}
 	}()
 
-	return ch, nil
+	return ch
 }
 
 // logsStreamWithServiceMetadata wraps a container logs stream and enriches each log entry with service metadata.

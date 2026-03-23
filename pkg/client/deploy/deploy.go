@@ -17,12 +17,12 @@ import (
 )
 
 type Client interface {
+	operation.Client
 	api.ContainerClient
 	api.DNSClient
 	api.ImageClient
 	api.MachineClient
 	api.ServiceClient
-	api.VolumeClient
 }
 
 // Deployment manages the process of creating or updating a service to match a desired state.
@@ -34,7 +34,9 @@ type Deployment struct {
 	cli      Client
 	plan     *ServicePlan
 	// state is an optional current and planned cluster state used for scheduling decisions.
-	state *scheduler.ClusterState
+	state           *scheduler.ClusterState
+	serviceResolved bool
+	clusterDomain   *string
 }
 
 type ServicePlan struct {
@@ -289,6 +291,13 @@ func NewDeploymentWithClusterState(
 	return d
 }
 
+// UseResolvedState injects already-known service/domain state for this deployment and skips redundant lookups.
+func (d *Deployment) UseResolvedState(service *api.Service, clusterDomain *string) {
+	d.Service = service
+	d.serviceResolved = true
+	d.clusterDomain = clusterDomain
+}
+
 // Plan returns a plan of operations to reconcile the service to the desired state.
 // If a plan has already been created, the same plan will be returned.
 func (d *Deployment) Plan(ctx context.Context) (ServicePlan, error) {
@@ -301,9 +310,15 @@ func (d *Deployment) Plan(ctx context.Context) (ServicePlan, error) {
 		return ServicePlan{}, fmt.Errorf("invalid deployment: %w", err)
 	}
 
-	clusterDomain, err := d.cli.GetDomain(ctx)
-	if err != nil && !errors.Is(err, api.ErrNotFound) {
-		return ServicePlan{}, fmt.Errorf("get cluster domain: %w", err)
+	clusterDomain := ""
+	if d.clusterDomain != nil {
+		clusterDomain = *d.clusterDomain
+	} else {
+		var err error
+		clusterDomain, err = d.cli.GetDomain(ctx)
+		if err != nil && !errors.Is(err, api.ErrNotFound) {
+			return ServicePlan{}, fmt.Errorf("get cluster domain: %w", err)
+		}
 	}
 	specResolver := &ServiceSpecResolver{
 		// If the domain is not found (not reserved), an empty domain is used for the resolver.
@@ -337,13 +352,14 @@ func (d *Deployment) Validate(ctx context.Context) error {
 		return fmt.Errorf("invalid service spec: %w", err)
 	}
 
-	if d.Service == nil {
+	if !d.serviceResolved && d.Service == nil {
 		svc, err := d.cli.InspectService(ctx, d.Spec.Name)
 		if err == nil {
 			d.Service = &svc
 		} else if !errors.Is(err, api.ErrNotFound) {
 			return fmt.Errorf("inspect service: %w", err)
 		}
+		d.serviceResolved = true
 	}
 	// d.Service is nil if the service doesn't exist yet (first deployment).
 	if d.Service == nil {
