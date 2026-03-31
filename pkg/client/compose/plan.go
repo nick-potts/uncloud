@@ -2,7 +2,9 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,6 +19,8 @@ import (
 type Plan struct {
 	Volumes  []*operation.CreateVolumeOperation
 	Services []*deploy.ServicePlan
+
+	serviceDependencies map[string][]string
 }
 
 // IsEmpty returns true if the plan has no volume or service operations.
@@ -127,4 +131,82 @@ func (p *Plan) Execute(ctx context.Context, cli operation.Client) error {
 		}
 	}
 	return nil
+}
+
+// ExecuteParallel runs volume operations first, then deploys independent services in parallel
+// while preserving dependency order between service batches.
+func (p *Plan) ExecuteParallel(ctx context.Context, cli operation.Client) error {
+	_, err := p.ExecuteRollout(ctx, cli, RolloutOptions{Parallel: true})
+	return err
+}
+
+func (p *Plan) serviceBatches() ([][]*deploy.ServicePlan, error) {
+	if len(p.Services) == 0 {
+		return nil, nil
+	}
+
+	planByName := make(map[string]*deploy.ServicePlan, len(p.Services))
+	order := make(map[string]int, len(p.Services))
+	dependents := make(map[string][]string, len(p.Services))
+	inDegree := make(map[string]int, len(p.Services))
+	for i, sp := range p.Services {
+		planByName[sp.ServiceName] = sp
+		order[sp.ServiceName] = i
+		inDegree[sp.ServiceName] = 0
+	}
+
+	for serviceName, deps := range p.serviceDependencies {
+		if _, ok := planByName[serviceName]; !ok {
+			continue
+		}
+		for _, depName := range deps {
+			if _, ok := planByName[depName]; !ok {
+				return nil, fmt.Errorf("service '%s' depends on missing planned service '%s'", serviceName, depName)
+			}
+			inDegree[serviceName]++
+			dependents[depName] = append(dependents[depName], serviceName)
+		}
+	}
+
+	ready := make([]string, 0, len(p.Services))
+	for _, sp := range p.Services {
+		if inDegree[sp.ServiceName] == 0 {
+			ready = append(ready, sp.ServiceName)
+		}
+	}
+
+	var (
+		batches   [][]*deploy.ServicePlan
+		processed int
+	)
+	for len(ready) > 0 {
+		batchNames := append([]string(nil), ready...)
+		ready = nil
+
+		batch := make([]*deploy.ServicePlan, 0, len(batchNames))
+		for _, name := range batchNames {
+			batch = append(batch, planByName[name])
+			processed++
+		}
+		batches = append(batches, batch)
+
+		next := make([]string, 0, len(p.Services))
+		for _, name := range batchNames {
+			for _, dependent := range dependents[name] {
+				inDegree[dependent]--
+				if inDegree[dependent] == 0 {
+					next = append(next, dependent)
+				}
+			}
+		}
+		slices.SortFunc(next, func(a, b string) int {
+			return order[a] - order[b]
+		})
+		ready = next
+	}
+
+	if processed != len(p.Services) {
+		return nil, errors.New("cannot create parallel service batches: dependency cycle detected")
+	}
+	return batches, nil
 }

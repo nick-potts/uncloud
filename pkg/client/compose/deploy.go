@@ -131,9 +131,38 @@ func (d *Deployment) Plan(ctx context.Context) (Plan, error) {
 			plan.Services = append(plan.Services, &servicePlan)
 		}
 	}
+	plan.serviceDependencies = d.serviceDependencies(plan.Services)
 
 	d.plan = &plan
 	return plan, nil
+}
+
+func (d *Deployment) serviceDependencies(plans []*deploy.ServicePlan) map[string][]string {
+	if len(plans) == 0 {
+		return nil
+	}
+
+	planned := make(map[string]struct{}, len(plans))
+	for _, sp := range plans {
+		planned[sp.ServiceName] = struct{}{}
+	}
+
+	deps := make(map[string][]string, len(plans))
+	for _, sp := range plans {
+		service, ok := d.Project.Services[sp.ServiceName]
+		if !ok {
+			continue
+		}
+
+		for depName := range service.DependsOn {
+			if _, ok := planned[depName]; ok {
+				deps[sp.ServiceName] = append(deps[sp.ServiceName], depName)
+			}
+		}
+		slices.Sort(deps[sp.ServiceName])
+	}
+
+	return deps
 }
 
 // ServiceSpec returns the service specification for the given compose service that is ready for deployment.

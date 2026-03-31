@@ -107,19 +107,11 @@ func ServiceSpecFromCompose(project *types.Project, serviceName string) (api.Ser
 		}
 
 		if cfg := service.Deploy.UpdateConfig; cfg != nil {
-			switch cfg.Order {
-			case "":
-				// No order specified, use default behavior.
-			case "start-first":
-				spec.UpdateConfig.Order = api.UpdateOrderStartFirst
-			case "stop-first":
-				spec.UpdateConfig.Order = api.UpdateOrderStopFirst
-			default:
-				return spec, fmt.Errorf("unsupported deploy.update_config.order: '%s'", cfg.Order)
+			updateConfig, err := updateConfigFromCompose(cfg, "deploy.update_config")
+			if err != nil {
+				return spec, err
 			}
-
-			d := time.Duration(cfg.Monitor)
-			spec.UpdateConfig.MonitorPeriod = &d
+			spec.UpdateConfig = updateConfig
 		}
 	}
 
@@ -142,6 +134,31 @@ func ServiceSpecFromCompose(project *types.Project, serviceName string) (api.Ser
 	spec.Container.ConfigMounts = configMounts
 
 	return spec, nil
+}
+
+func updateConfigFromCompose(cfg *types.UpdateConfig, fieldPath string) (api.UpdateConfig, error) {
+	var updateConfig api.UpdateConfig
+
+	switch cfg.Order {
+	case "":
+		// No order specified, use default behavior.
+	case "start-first":
+		updateConfig.Order = api.UpdateOrderStartFirst
+	case "stop-first":
+		updateConfig.Order = api.UpdateOrderStopFirst
+	default:
+		return updateConfig, fmt.Errorf("unsupported %s.order: '%s'", fieldPath, cfg.Order)
+	}
+
+	d := time.Duration(cfg.Monitor)
+	updateConfig.MonitorPeriod = &d
+
+	if cfg.Parallelism != nil {
+		parallelism := *cfg.Parallelism
+		updateConfig.Parallelism = &parallelism
+	}
+
+	return updateConfig, nil
 }
 
 func healthcheckFromCompose(hc *types.HealthCheckConfig) *api.HealthcheckSpec {

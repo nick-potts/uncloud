@@ -440,6 +440,8 @@ type UpdateConfig struct {
 	// Valid values are "start-first" (default for stateless services) and "stop-first" (default for services with
 	// volumes). Empty value means the strategy will determine the order based on service characteristics.
 	Order string `json:",omitempty"`
+	// Parallelism is the maximum number of candidate rollout operations to execute concurrently after the canary passes.
+	Parallelism *uint64 `json:",omitempty"`
 	// MonitorPeriod is how long to wait after starting a container before checking that it's still running
 	// and not restarting. Containers with a health check that become healthy before the period ends succeed early.
 	// nil means use the default api.DefaultHealthMonitorPeriod.

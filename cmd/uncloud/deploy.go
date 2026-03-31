@@ -24,6 +24,7 @@ type deployOptions struct {
 	profiles   []string
 	services   []string
 	noBuild    bool
+	parallel   bool
 	recreate   bool
 	skipHealth bool
 	yes        bool
@@ -57,6 +58,9 @@ func NewDeployCommand() *cobra.Command {
 		"Do not build new images before deploying services.")
 	cmd.Flags().BoolVar(&opts.BuildServicesOptions.NoCache, "no-cache", false,
 		"Do not use cache when building images.")
+	cmd.Flags().BoolVar(&opts.parallel, "parallel", false,
+		"Deploy independent services in parallel while respecting dependency order.\n"+
+			"Boots one new container per service in each dependency tier first, waits for health, then continues the rollout.")
 	cmd.Flags().StringSliceVarP(&opts.profiles, "profile", "p", nil,
 		"One or more Compose profiles to enable.")
 	cmd.Flags().BoolVar(&opts.recreate, "recreate", false,
@@ -223,10 +227,25 @@ func runDeploy(ctx context.Context, uncli *cli.CLI, opts deployOptions) error {
 	if deployTarget != "" {
 		title += " to " + tui.NameStyle.Render(deployTarget)
 	}
-	return progress.RunWithTitle(ctx, func(ctx context.Context) error {
-		if err := plan.Execute(ctx, clusterClient); err != nil {
+	useRolloutExecutor := opts.parallel
+	var rolloutResult compose.RolloutResult
+	err = progress.RunWithTitle(ctx, func(ctx context.Context) error {
+		var err error
+		if useRolloutExecutor {
+			rolloutResult, err = plan.ExecuteRollout(ctx, clusterClient, compose.RolloutOptions{
+				Parallel: opts.parallel,
+			})
+		} else {
+			err = plan.Execute(ctx, clusterClient)
+		}
+		if err != nil {
 			return fmt.Errorf("deploy services: %w", err)
 		}
 		return nil
 	}, uncli.ProgressOut(), title)
+	if useRolloutExecutor && len(rolloutResult.Services) > 0 {
+		fmt.Println()
+		fmt.Print(rolloutResult.Format())
+	}
+	return err
 }

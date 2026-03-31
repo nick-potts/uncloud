@@ -885,16 +885,17 @@ services:
 			},
 		},
 		{
-			name: "update_config with unsupported attributes ignored",
+			name: "update_config with parallelism",
 			composeYAML: `
 services:
   test:
     image: nginx
     deploy:
       update_config:
-        parallelism: 1
+        parallelism: 7
 `,
 			expected: api.UpdateConfig{
+				Parallelism:   api.AsPtr(uint64(7)),
 				MonitorPeriod: &api.DefaultHealthMonitorPeriod,
 			},
 		},
@@ -1006,16 +1007,15 @@ services:
 		t.Run(tt.name, func(t *testing.T) {
 			project, err := LoadProjectFromContent(context.Background(), tt.composeYAML)
 			if tt.expectError {
-				require.Error(t, err)
+				if err == nil {
+					_, err = ServiceSpecFromCompose(project, "test")
+				}
+				assert.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 
 			spec, err := ServiceSpecFromCompose(project, "test")
-			if tt.expectError {
-				assert.Error(t, err)
-				return
-			}
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.expected, spec.UpdateConfig)
