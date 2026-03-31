@@ -9,6 +9,7 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
@@ -279,6 +280,37 @@ func (c *Client) InspectImage(ctx context.Context, id string) ([]api.MachineImag
 	}
 
 	return images, nil
+}
+
+// PruneImages removes unused Docker images matching the provided filters on one or more machines.
+func (c *Client) PruneImages(ctx context.Context, pruneFilters filters.Args) ([]api.MachineImagePruneReport, error) {
+	filtersJSON, err := filters.ToJSON(pruneFilters)
+	if err != nil {
+		return nil, fmt.Errorf("marshal filters: %w", err)
+	}
+
+	resp, err := c.GRPCClient.PruneImages(ctx, &pb.PruneImagesRequest{Filters: []byte(filtersJSON)})
+	if err != nil {
+		return nil, err
+	}
+
+	return parseMachineImagePruneReports(resp.Messages)
+}
+
+func parseMachineImagePruneReports(messages []*pb.MachineImagePruneReport) ([]api.MachineImagePruneReport, error) {
+	reports := make([]api.MachineImagePruneReport, len(messages))
+	for i, msg := range messages {
+		reports[i].Metadata = msg.Metadata
+		if msg.Metadata != nil && msg.Metadata.Error != "" {
+			continue
+		}
+
+		if err := json.Unmarshal(msg.Report, &reports[i].Report); err != nil {
+			return nil, fmt.Errorf("unmarshal image prune report: %w", err)
+		}
+	}
+
+	return reports, nil
 }
 
 // InspectRemoteImage returns the image metadata for an image in a remote registry using the machine's Docker auth

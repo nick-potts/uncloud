@@ -22,6 +22,11 @@ type MachineImages struct {
 	ContainerdStore bool
 }
 
+type MachineImagePruneReport struct {
+	Metadata *pb.Metadata
+	Report   image.PruneReport
+}
+
 // ImageFilter defines criteria to filter images in ListImages.
 type ImageFilter struct {
 	// Machines filters images to those present on the specified machines (names or IDs).

@@ -25,6 +25,7 @@ service Docker {
   // Docker auth credentials if necessary.
   rpc InspectRemoteImage(InspectRemoteImageRequest) returns (InspectRemoteImageResponse);
   rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc PruneImages(PruneImagesRequest) returns (PruneImagesResponse);
 
   rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
   rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
@@ -213,6 +214,22 @@ message MachineImages {
   bytes images = 2;
   // True if Docker uses the containerd image store, false if it uses its internal image store.
   bool containerd_store = 3;
+}
+
+message PruneImagesRequest {
+  // JSON serialised filters.Args.
+  bytes filters = 1;
+}
+
+message PruneImagesResponse {
+  // Must contain only one repeated messages field to allow broadcasting PruneImages requests to multiple machines.
+  repeated MachineImagePruneReport messages = 1;
+}
+
+message MachineImagePruneReport {
+  Metadata metadata = 1;
+  // JSON serialised image.PruneReport.
+  bytes report = 2;
 }
 
 message CreateVolumeRequest {

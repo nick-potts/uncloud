@@ -431,6 +431,32 @@ func (s *Server) ListImages(ctx context.Context, req *pb.ListImagesRequest) (*pb
 	}, nil
 }
 
+// PruneImages removes unused Docker images matching the provided filters.
+func (s *Server) PruneImages(ctx context.Context, req *pb.PruneImagesRequest) (*pb.PruneImagesResponse, error) {
+	pruneFilters := filters.NewArgs()
+	if len(req.Filters) > 0 {
+		var err error
+		pruneFilters, err = filters.FromJSON(string(req.Filters))
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "unmarshal filters: %v", err)
+		}
+	}
+
+	report, err := s.service.PruneImages(ctx, pruneFilters)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	machineReport := pb.MachineImagePruneReport{}
+	if machineReport.Report, err = json.Marshal(report); err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal image prune report: %v", err)
+	}
+
+	return &pb.PruneImagesResponse{
+		Messages: []*pb.MachineImagePruneReport{&machineReport},
+	}, nil
+}
+
 // CreateVolume creates a new volume with the given options.
 func (s *Server) CreateVolume(ctx context.Context, req *pb.CreateVolumeRequest) (*pb.CreateVolumeResponse, error) {
 	var opts volume.CreateOptions

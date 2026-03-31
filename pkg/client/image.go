@@ -102,6 +102,57 @@ func (cli *Client) ListImages(ctx context.Context, filter api.ImageFilter) ([]ap
 	return machineImages, nil
 }
 
+type PruneImagesOptions struct {
+	// DanglingOnly removes only dangling images. If false, all unused images are removed.
+	DanglingOnly bool
+	// Machines filters pruning to the specified machine names or IDs. If empty, all machines are targeted.
+	Machines []string
+}
+
+// PruneImages removes unused Docker images on the specified machines. By default, it removes all unused images.
+func (cli *Client) PruneImages(ctx context.Context, opts PruneImagesOptions) ([]api.MachineImagePruneReport, error) {
+	pruneCtx, machines, err := cli.ProxyMachinesContext(ctx, opts.Machines)
+	if err != nil {
+		return nil, fmt.Errorf("create request context to broadcast to machines: %w", err)
+	}
+
+	pruneFilters := newImagePruneFilters(opts.DanglingOnly)
+	reports, err := cli.Docker.PruneImages(pruneCtx, pruneFilters)
+	if err != nil {
+		return nil, err
+	}
+
+	var pruneErr error
+	for i, report := range reports {
+		if report.Metadata == nil {
+			// Metadata can be nil if the request was proxied to only one machine.
+			reports[i].Metadata = &pb.Metadata{
+				Machine: machines[0].Machine.Id,
+			}
+			continue
+		}
+
+		machineName := report.Metadata.Machine
+		if m := machines.FindByManagementIP(report.Metadata.Machine); m != nil {
+			machineName = m.Machine.Name
+			reports[i].Metadata.Machine = m.Machine.Id
+		}
+
+		if report.Metadata.Error != "" {
+			pruneErr = errors.Join(pruneErr, fmt.Errorf("prune images on machine '%s': %s",
+				machineName, report.Metadata.Error))
+		}
+	}
+
+	return reports, pruneErr
+}
+
+func newImagePruneFilters(danglingOnly bool) filters.Args {
+	return filters.NewArgs(
+		filters.Arg("dangling", strconv.FormatBool(danglingOnly)),
+	)
+}
+
 type PushImageOptions struct {
 	// AllMachines pushes the image to all machines in the cluster. Takes precedence over Machines field.
 	AllMachines bool

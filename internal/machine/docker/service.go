@@ -155,6 +155,16 @@ func (s *Service) ListImages(ctx context.Context, opts image.ListOptions) (Image
 	return imagesResp, nil
 }
 
+// PruneImages removes unused Docker images matching the provided filters.
+func (s *Service) PruneImages(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error) {
+	report, err := s.Client.ImagesPrune(ctx, pruneFilters)
+	if err != nil {
+		return image.PruneReport{}, status.Errorf(codes.Internal, "prune images: %v", err)
+	}
+
+	return report, nil
+}
+
 // ContainerLogsOptions specifies parameters for ContainerLogs.
 type ContainerLogsOptions struct {
 	ContainerID string

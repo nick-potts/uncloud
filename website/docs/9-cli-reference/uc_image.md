@@ -21,5 +21,6 @@ Manage images on machines in the cluster.
 
 * [uc](uc.md)	 - A CLI tool for managing Uncloud resources such as machines, services, and volumes.
 * [uc image ls](uc_image_ls.md)	 - List images on machines in the cluster.
+* [uc image prune](uc_image_prune.md)	 - Remove unused images on machines in the cluster.
 * [uc image push](uc_image_push.md)	 - Upload a local Docker image to the cluster.
 
